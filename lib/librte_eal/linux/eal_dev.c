@@ -23,8 +23,11 @@
 
 #include "eal_private.h"
 
-static struct rte_intr_handle intr_handle = {.fd = -1 };
-static bool monitor_started;
+static struct rte_intr_handle intr_handle = {
+	.type = RTE_INTR_HANDLE_DEV_EVENT,
+	.fd = -1,
+};
+static uint32_t monitor_refcount;
 static bool hotplug_handle;
 
 #define EAL_UEV_MSG_LEN 4096
@@ -300,7 +303,7 @@ rte_dev_event_monitor_start(void)
 {
 	int ret;
 
-	if (monitor_started)
+	if (__atomic_fetch_add(&monitor_refcount, 1, __ATOMIC_RELAXED))
 		return 0;
 
 	ret = dev_uev_socket_fd_create();
@@ -309,15 +312,12 @@ rte_dev_event_monitor_start(void)
 		return -1;
 	}
 
-	intr_handle.type = RTE_INTR_HANDLE_DEV_EVENT;
 	ret = rte_intr_callback_register(&intr_handle, dev_uev_handler, NULL);
 
 	if (ret) {
 		RTE_LOG(ERR, EAL, "fail to register uevent callback.\n");
 		return -1;
 	}
-
-	monitor_started = true;
 
 	return 0;
 }
@@ -327,7 +327,7 @@ rte_dev_event_monitor_stop(void)
 {
 	int ret;
 
-	if (!monitor_started)
+	if (__atomic_sub_fetch(&monitor_refcount, 1, __ATOMIC_RELAXED))
 		return 0;
 
 	ret = rte_intr_callback_unregister(&intr_handle, dev_uev_handler,
@@ -339,7 +339,6 @@ rte_dev_event_monitor_stop(void)
 
 	close(intr_handle.fd);
 	intr_handle.fd = -1;
-	monitor_started = false;
 
 	return 0;
 }
