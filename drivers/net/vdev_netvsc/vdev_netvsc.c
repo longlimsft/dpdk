@@ -66,6 +66,7 @@ struct vdev_netvsc_ctx {
 	char devargs[256];		   /**< Fail-safe device arguments. */
 	char if_name[IF_NAMESIZE];	   /**< NetVSC netdevice name. */
 	unsigned int if_index;		   /**< NetVSC netdevice index. */
+	int pci_found;			   /**< Device detection */
 	struct rte_ether_addr if_addr;	   /**< NetVSC MAC address. */
 	int pipe[2];			   /**< Fail-safe communication pipe. */
 	char yield[256];		   /**< PCI sub-device arguments. */
@@ -405,11 +406,18 @@ vdev_netvsc_device_probe(const struct if_nameindex *iface,
 	len = strlen(addr);
 	if (!len)
 		return 0;
+
+	ctx->pci_found = 1;
+
+	/* Skip if this is same device already sent to failsafe */
+	if (strcmp(addr, ctx->yield) == 0)
+		return 0;
+
+	DRV_LOG(DEBUG, "associating PCI device \"%s\" with NetVSC"
+		" interface \"%s\" (index %u)", addr, ctx->if_name,
+		ctx->if_index);
+
 	/* Send PCI device argument to fail-safe PMD instance. */
-	if (strcmp(addr, ctx->yield))
-		DRV_LOG(DEBUG, "associating PCI device \"%s\" with NetVSC"
-			" interface \"%s\" (index %u)", addr, ctx->if_name,
-			ctx->if_index);
 	memmove(buf, addr, len + 1);
 	addr = buf;
 	buf[len] = '\n';
@@ -452,12 +460,33 @@ vdev_netvsc_alarm(__rte_unused void *arg)
 	struct vdev_netvsc_ctx *ctx;
 	int ret;
 
+	/* 1st pass: clear PCI flag on all devices */
+	LIST_FOREACH(ctx, &vdev_netvsc_ctx_list, entry) {
+		ctx->pci_found = 0;
+	}
+
+	/* 2nd pass: scan all system devices to look for changes to this device */
 	LIST_FOREACH(ctx, &vdev_netvsc_ctx_list, entry) {
 		ret = vdev_netvsc_foreach_iface(vdev_netvsc_device_probe, 0,
 		      ctx);
-		if (ret < 0)
+
+		if (ret < 0) {
+			DRV_LOG(NOTICE, "can not scan devices for %s\n",
+				ctx->if_name);
 			break;
+		}
 	}
+
+	/* 3rd pass: detect PCI removal */
+	LIST_FOREACH(ctx, &vdev_netvsc_ctx_list, entry) {
+		if (!ctx->pci_found && ctx->yield[0]) {
+			DRV_LOG(DEBUG, "disassociating PCI device \"%s\" from NetVSC"
+				" interface \"%s\" (index %u)", ctx->yield, ctx->if_name,
+				ctx->if_index);
+			ctx->yield[0] = '\0';
+		}
+	}
+
 	if (!vdev_netvsc_ctx_count)
 		return;
 	ret = rte_eal_alarm_set(VDEV_NETVSC_PROBE_MS * 1000,
