@@ -61,6 +61,8 @@
 #include <rte_latencystats.h>
 #endif
 
+#include <rte_ethdev_driver.h>
+
 #include "testpmd.h"
 
 #ifndef MAP_HUGETLB
@@ -3084,6 +3086,8 @@ rmv_port_callback(void *arg)
 	close_port(port_id);
 	detach_device(dev); /* might be already removed or have more ports */
 
+	rte_eth_dev_release_port(&rte_eth_devices[port_id]);
+
 	if (need_to_start)
 		start_packet_forwarding(0);
 }
@@ -3153,6 +3157,7 @@ dev_event_callback(const char *device_name, enum rte_dev_event_type type,
 {
 	uint16_t port_id;
 	int ret;
+	char *new_name = malloc(100);
 
 	if (type >= RTE_DEV_EVENT_MAX) {
 		fprintf(stderr, "%s called upon invalid event %d\n",
@@ -3164,7 +3169,11 @@ dev_event_callback(const char *device_name, enum rte_dev_event_type type,
 	case RTE_DEV_EVENT_REMOVE:
 		RTE_LOG(DEBUG, EAL, "The device: %s has been removed!\n",
 			device_name);
-		ret = rte_eth_dev_get_port_by_name(device_name, &port_id);
+		strcpy(new_name, "mlx4_1 port 1");
+		RTE_LOG(DEBUG, EAL, "changed to new name : %s\n",
+			new_name);
+//		ret = rte_eth_dev_get_port_by_name(device_name, &port_id);
+		ret = rte_eth_dev_get_port_by_name(new_name, &port_id);
 		if (ret) {
 			RTE_LOG(ERR, EAL, "can not get port by device %s!\n",
 				device_name);
@@ -3190,6 +3199,12 @@ dev_event_callback(const char *device_name, enum rte_dev_event_type type,
 		/* TODO: After finish kernel driver binding,
 		 * begin to attach port.
 		 */
+//		strcpy(new_name, "mlx4_1 port 1");
+//		RTE_LOG(DEBUG, EAL, "changed to new name : %s\n",
+//			new_name);
+		sleep(10); //hack give dpdk core a little time
+		strcpy(new_name, device_name);
+		attach_port(new_name);
 		break;
 	default:
 		break;

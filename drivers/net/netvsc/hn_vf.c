@@ -24,6 +24,7 @@
 #include <rte_bus_pci.h>
 #include <rte_log.h>
 #include <rte_string_fns.h>
+#include <rte_alarm.h>
 
 #include "hn_logs.h"
 #include "hn_var.h"
@@ -85,15 +86,53 @@ static int hn_vf_attach(struct hn_data *hv, uint16_t port_id)
 	return 0;
 }
 
+int hn_vf_add(struct rte_eth_dev *dev, struct hn_data *hv);
+static void hn_vf_add_delayed(void *arg)
+{
+	struct rte_eth_dev *dev = arg;
+	struct hn_data *hv = dev->data->dev_private;
+	static int retry = 0;
+
+	if (retry++ < 60)
+		hn_vf_add(dev, hv);
+}
+
 /* Add new VF device to synthetic device */
 int hn_vf_add(struct rte_eth_dev *dev, struct hn_data *hv)
 {
 	int port, err;
+	int ret;
+
+	struct rte_eth_txq_info txinfo;
+	struct rte_eth_rxq_info rxinfo;
+	struct hn_rx_queue *rxq;
+
+	int my_port = dev->data->port_id;
 
 	port = hn_vf_match(dev);
 	if (port < 0) {
-		PMD_DRV_LOG(NOTICE, "No matching MAC found");
+		PMD_DRV_LOG(NOTICE, "No matching MAC found, try again");
+		rte_eal_alarm_set(1000000, hn_vf_add_delayed, (void *) dev);
 		return port;
+	} else {
+		PMD_DRV_LOG(NOTICE, "matching MAC found, port %d\n", port);
+		// TODO start this may be a port that appears on the fly, configure and start it before we can use it
+		PMD_DRV_LOG(NOTICE, " TODO start this may be a port that appears on the fly, configure and start it before we can use it");
+
+		if (dev->data->rx_queues) { // we have queue already setup, this must be a hot plug
+			PMD_DRV_LOG(NOTICE, "Starting VF port %d\n", port);
+			ret = rte_eth_dev_configure(port, dev->data->nb_rx_queues, dev->data->nb_tx_queues, &dev->data->dev_conf);
+			PMD_DRV_LOG(NOTICE, "rte_eth_dev_configure ret %d\n", ret);
+			rte_eth_tx_queue_info_get(my_port, 0, &txinfo);
+			rte_eth_tx_queue_setup(port, 0, txinfo.nb_desc, 0, &txinfo.conf);
+
+			rxq = dev->data->rx_queues[0];
+			rte_eth_rx_queue_info_get(my_port, 0, &rxinfo);
+			rte_eth_rx_queue_setup(port, 0, rxinfo.nb_desc, 0, &rxinfo.conf, rxq->mb_pool);
+
+			ret = rte_eth_dev_start(port);
+			PMD_DRV_LOG(NOTICE, "rte_eth_dev_start ret %d\n", ret);
+		}
 	}
 
 	err = hn_vf_attach(hv, port);
