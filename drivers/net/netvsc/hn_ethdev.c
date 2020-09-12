@@ -27,6 +27,7 @@
 #include <rte_eal.h>
 #include <rte_dev.h>
 #include <rte_bus_vmbus.h>
+#include <rte_alarm.h>
 
 #include "hn_logs.h"
 #include "hn_var.h"
@@ -527,6 +528,64 @@ static int hn_subchan_configure(struct hn_data *hv,
 	return err;
 }
 
+static void netvsc_hotplug_retry(void *args)
+{
+	int ret;
+	struct hn_data *hv = args;
+	struct rte_devargs *d = &hv->devargs;
+
+	if (hv->eal_hot_plug_retry++ < 5) {
+		ret = rte_eal_hotplug_add(d->bus->name, d->name, d->args);
+		if (ret == -ENODEV)
+			// try again
+			rte_eal_alarm_set(1000000, netvsc_hotplug_retry, hv);
+	}
+}
+
+static void
+netvsc_hotadd_callback(const char *device_name,
+		enum rte_dev_event_type type,
+		void *arg)
+{
+	struct hn_data *hv = arg;
+	struct rte_devargs *d = &hv->devargs;
+	int ret;
+
+	PMD_DRV_LOG(ERR, "%s: type=%d device_name=%s\n", __func__, type, device_name);
+
+	switch (type) {
+		case RTE_DEV_EVENT_ADD:
+
+			// if we already has a VF, don't bother
+			if (hv->vf_port != HN_INVALID_PORT)
+				break;
+
+			ret = rte_devargs_parse(d, device_name);
+			if (ret) {
+				PMD_DRV_LOG(ERR, "%s: devargs parsing failed ret=%d\n", __func__, ret);
+				return;
+			}
+
+			printf("%s: bus_name %s name %s args %s\n", __func__, d->bus->name, d->name, d->args);
+
+			ret = rte_eal_hotplug_add(d->bus->name, d->name, d->args);
+			if (ret == -ENODEV) {
+				// try again
+				rte_eal_alarm_set(1000000, netvsc_hotplug_retry, hv);
+			} else if (ret < 0) {
+				PMD_DRV_LOG(ERR, "%s: device probe failed ret %d rte_errno %d\n", __func__, ret, rte_errno);
+
+				return;
+			}
+
+			// We will switch to VF on RDNIS configure message
+
+			break;
+		default:
+			break;
+	}
+}
+
 static int hn_dev_configure(struct rte_eth_dev *dev)
 {
 	struct rte_eth_conf *dev_conf = &dev->data->dev_conf;
@@ -812,6 +871,19 @@ hn_dev_start(struct rte_eth_dev *dev)
 
 	PMD_INIT_FUNC_TRACE();
 
+	// monitor hot plug
+//	error = rte_dev_hotplug_handle_enable();
+//	if (error) {
+//		PMD_DRV_LOG(ERR, "failed to enable hotplug\n");
+//		return error;
+//	}
+
+	error = rte_dev_event_callback_register(NULL, netvsc_hotadd_callback, hv);
+	if (error) {
+		PMD_DRV_LOG(ERR, "failed to register device event callback\n");
+		return error;
+	}
+
 	error = hn_rndis_set_rxfilter(hv,
 				      NDIS_PACKET_TYPE_BROADCAST |
 				      NDIS_PACKET_TYPE_ALL_MULTICAST |
@@ -837,6 +909,7 @@ hn_dev_stop(struct rte_eth_dev *dev)
 
 	PMD_INIT_FUNC_TRACE();
 
+	rte_dev_event_callback_unregister(NULL, netvsc_hotadd_callback, hv);
 	hn_rndis_set_rxfilter(hv, 0);
 	hn_vf_stop(dev);
 }
@@ -844,7 +917,11 @@ hn_dev_stop(struct rte_eth_dev *dev)
 static void
 hn_dev_close(struct rte_eth_dev *dev)
 {
+	struct hn_data *hv = dev->data->dev_private;
+
 	PMD_INIT_FUNC_TRACE();
+
+	rte_eal_alarm_cancel(netvsc_hotplug_retry, &hv->devargs);
 
 	hn_vf_close(dev);
 	hn_dev_free_queues(dev);
@@ -963,6 +1040,7 @@ eth_hn_dev_init(struct rte_eth_dev *eth_dev)
 	hv->max_queues = 1;
 	rte_rwlock_init(&hv->vf_lock);
 	hv->vf_port = HN_INVALID_PORT;
+	hv->vf_associated = false;
 
 	err = hn_parse_args(eth_dev);
 	if (err)
@@ -1016,7 +1094,7 @@ eth_hn_dev_init(struct rte_eth_dev *eth_dev)
 	hv->max_queues = RTE_MIN(rxr_cnt, (unsigned int)max_chan);
 
 	/* If VF was reported but not added, do it now */
-	if (hv->vf_present && !hn_vf_attached(hv)) {
+	if (hv->vf_present && !hn_vf_associated(hv)) {
 		PMD_INIT_LOG(DEBUG, "Adding VF device");
 
 		err = hn_vf_add(eth_dev, hv);
@@ -1071,13 +1149,22 @@ static int eth_hn_probe(struct rte_vmbus_driver *drv __rte_unused,
 
 	PMD_INIT_FUNC_TRACE();
 
+	ret = rte_dev_event_monitor_start();
+	if (ret) {
+		PMD_DRV_LOG(ERR, "failed to start device event monitoring\n");
+		return ret;
+	}
+
+
 	eth_dev = eth_dev_vmbus_allocate(dev, sizeof(struct hn_data));
 	if (!eth_dev)
 		return -ENOMEM;
 
 	ret = eth_hn_dev_init(eth_dev);
-	if (ret)
+	if (ret) {
 		eth_dev_vmbus_release(eth_dev);
+		rte_dev_event_monitor_stop();
+	}
 	else
 		rte_eth_dev_probing_finish(eth_dev);
 
@@ -1100,6 +1187,7 @@ static int eth_hn_remove(struct rte_vmbus_device *dev)
 		return ret;
 
 	eth_dev_vmbus_release(eth_dev);
+	rte_dev_event_monitor_stop();
 	return 0;
 }
 

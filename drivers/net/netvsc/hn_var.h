@@ -103,6 +103,7 @@ struct hn_data {
 	uint16_t	port_id;
 	uint16_t	vf_port;
 
+	bool		vf_associated;
 	uint8_t		vf_present;
 	uint8_t		closed;
 	uint8_t		vlan_strip;
@@ -143,6 +144,11 @@ struct hn_data {
 	struct rte_eth_dev_owner owner;
 
 	struct vmbus_channel *channels[HN_MAX_CHANNELS];
+
+	struct rte_devargs devargs;
+	int		eal_hot_plug_retry;
+//	struct rte_eth_txconf txconf;
+//	struct rte_eth_rxconf rxconf;
 };
 
 static inline struct vmbus_channel *
@@ -191,6 +197,13 @@ static inline bool
 hn_vf_attached(const struct hn_data *hv)
 {
 	return hv->vf_port != HN_INVALID_PORT;
+}
+
+/* Check if VF is associated to Primary */
+static inline bool
+hn_vf_associated(const struct hn_data *hv)
+{
+	return hv->vf_associated;
 }
 
 /*
