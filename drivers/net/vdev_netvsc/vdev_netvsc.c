@@ -74,6 +74,8 @@ struct vdev_netvsc_ctx {
 /** Context list is common to all driver instances. */
 static LIST_HEAD(, vdev_netvsc_ctx) vdev_netvsc_ctx_list =
 	LIST_HEAD_INITIALIZER(vdev_netvsc_ctx_list);
+static rte_rwlock_t vdev_netvsc_ctx_list_lock;
+static int vdev_netvsc_alarm_set;
 
 /** Number of entries in context list. */
 static unsigned int vdev_netvsc_ctx_count;
@@ -452,19 +454,26 @@ vdev_netvsc_alarm(__rte_unused void *arg)
 	struct vdev_netvsc_ctx *ctx;
 	int ret;
 
+	rte_rwlock_read_lock(&vdev_netvsc_ctx_list_lock);
 	LIST_FOREACH(ctx, &vdev_netvsc_ctx_list, entry) {
 		ret = vdev_netvsc_foreach_iface(vdev_netvsc_device_probe, 0,
 		      ctx);
 		if (ret < 0)
 			break;
 	}
-	if (!vdev_netvsc_ctx_count)
+	rte_rwlock_read_unlock(&vdev_netvsc_ctx_list_lock);
+
+	if (!vdev_netvsc_ctx_count) {
+		vdev_netvsc_alarm_set = 0;
 		return;
+	}
+
 	ret = rte_eal_alarm_set(VDEV_NETVSC_PROBE_MS * 1000,
 				vdev_netvsc_alarm, NULL);
 	if (ret < 0) {
 		DRV_LOG(ERR, "unable to reschedule alarm callback: %s",
 			rte_strerror(-ret));
+		vdev_netvsc_alarm_set = 0;
 	}
 }
 
@@ -696,34 +705,39 @@ vdev_netvsc_vdev_probe(struct rte_vdev_device *dev)
 			" device.");
 		goto error;
 	}
-	rte_eal_alarm_cancel(vdev_netvsc_alarm, NULL);
+	rte_rwlock_write_lock(&vdev_netvsc_ctx_list_lock);
 	/* Gather interfaces. */
 	ret = vdev_netvsc_foreach_iface(vdev_netvsc_netvsc_probe, 1, name,
 					kvargs, specified, &matched);
 	if (ret < 0)
-		goto error;
+		goto error_unlock;
 	if (specified && matched < specified) {
 		if (!force) {
 			DRV_LOG(ERR, "Cannot find the specified netvsc device");
-			goto error;
+			goto error_unlock;
 		}
 		/* Try to force probing on non-netvsc specified device. */
 		if (vdev_netvsc_foreach_iface(vdev_netvsc_netvsc_probe, 0, name,
 					      kvargs, specified, &matched) < 0)
-			goto error;
+			goto error_unlock;
 		if (matched < specified) {
 			DRV_LOG(ERR, "Cannot find the specified device");
-			goto error;
+			goto error_unlock;
 		}
 		DRV_LOG(WARNING, "non-netvsc device was probed as netvsc");
 	}
-	ret = rte_eal_alarm_set(VDEV_NETVSC_PROBE_MS * 1000,
+	if (!vdev_netvsc_alarm_set) {
+		ret = rte_eal_alarm_set(VDEV_NETVSC_PROBE_MS * 1000,
 				vdev_netvsc_alarm, NULL);
-	if (ret < 0) {
-		DRV_LOG(ERR, "unable to schedule alarm callback: %s",
-			rte_strerror(-ret));
-		goto error;
+		if (ret < 0)
+			DRV_LOG(ERR, "unable to schedule alarm callback: %s",
+				rte_strerror(-ret));
+		else
+			vdev_netvsc_alarm_set = 1;
 	}
+
+error_unlock:
+	rte_rwlock_write_unlock(&vdev_netvsc_ctx_list_lock);
 error:
 	if (kvargs)
 		rte_kvargs_free(kvargs);
