@@ -81,6 +81,8 @@ static unsigned int vdev_netvsc_ctx_count;
 /** Number of driver instances relying on context list. */
 static unsigned int vdev_netvsc_ctx_inst;
 
+static rte_atomic32_t vdev_netvsc_alarmed;
+
 /**
  * Destroy a vdev_netvsc context instance.
  *
@@ -458,13 +460,16 @@ vdev_netvsc_alarm(__rte_unused void *arg)
 		if (ret < 0)
 			break;
 	}
-	if (!vdev_netvsc_ctx_count)
+	if (!vdev_netvsc_ctx_count) {
+		rte_atomic32_clear(&vdev_netvsc_alarmed);
 		return;
+	}
 	ret = rte_eal_alarm_set(VDEV_NETVSC_PROBE_MS * 1000,
 				vdev_netvsc_alarm, NULL);
 	if (ret < 0) {
 		DRV_LOG(ERR, "unable to reschedule alarm callback: %s",
 			rte_strerror(-ret));
+		rte_atomic32_clear(&vdev_netvsc_alarmed);
 	}
 }
 
@@ -696,7 +701,6 @@ vdev_netvsc_vdev_probe(struct rte_vdev_device *dev)
 			" device.");
 		goto error;
 	}
-	rte_eal_alarm_cancel(vdev_netvsc_alarm, NULL);
 	/* Gather interfaces. */
 	ret = vdev_netvsc_foreach_iface(vdev_netvsc_netvsc_probe, 1, name,
 					kvargs, specified, &matched);
@@ -717,12 +721,15 @@ vdev_netvsc_vdev_probe(struct rte_vdev_device *dev)
 		}
 		DRV_LOG(WARNING, "non-netvsc device was probed as netvsc");
 	}
-	ret = rte_eal_alarm_set(VDEV_NETVSC_PROBE_MS * 1000,
+	if (rte_atomic32_test_and_set(&vdev_netvsc_alarmed)) {
+		ret = rte_eal_alarm_set(VDEV_NETVSC_PROBE_MS * 1000,
 				vdev_netvsc_alarm, NULL);
-	if (ret < 0) {
-		DRV_LOG(ERR, "unable to schedule alarm callback: %s",
-			rte_strerror(-ret));
-		goto error;
+		if (ret < 0) {
+			DRV_LOG(ERR, "unable to schedule alarm callback: %s",
+				rte_strerror(-ret));
+			rte_atomic32_clear(&vdev_netvsc_alarmed);
+			goto error;
+		}
 	}
 error:
 	if (kvargs)
