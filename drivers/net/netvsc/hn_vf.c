@@ -99,10 +99,14 @@ static void hn_remove_delayed(void *args)
 	struct rte_eth_dev *dev = &rte_eth_devices[port_id];
 	int ret;
 
+	hn_vf_remove(hv);
+	/*
 	if (hv->vf_associated) {
 		PMD_DRV_LOG(NOTICE, "wait until RDNIS tells us the data plane has been swtiched to synthetic path\n");
 		rte_eal_alarm_set(1000000, hn_remove_delayed, hv);
+		return;
 	}
+	*/
 
 	PMD_DRV_LOG(NOTICE, "%s: start to remove port %d\n", __func__, port_id);
 	// unload the VF device from the system
@@ -136,7 +140,7 @@ int hn_eth_rmv_event_callback(uint16_t port_id,
 
 	printf("%s: removing vf portid %d\n", __func__, port_id);
 
-	rte_eal_alarm_set(1000000, hn_remove_delayed, hv);
+	rte_eal_alarm_set(1, hn_remove_delayed, hv);
 
 	return 0;
 }
