@@ -306,6 +306,8 @@ hn_dev_tx_queue_setup(struct rte_eth_dev *dev,
 
 	hn_reset_txagg(txq);
 
+//	hv->txconf = *tx_conf;
+
 	err = hn_vf_tx_queue_setup(dev, queue_idx, nb_desc,
 				     socket_id, tx_conf);
 	if (err == 0) {
@@ -943,6 +945,7 @@ hn_dev_rx_queue_setup(struct rte_eth_dev *dev,
 	if (!rxq->rx_ring)
 		goto fail;
 
+//	hv->rxconf = *rx_conf;
 	error = hn_vf_rx_queue_setup(dev, queue_idx, nb_desc,
 				     socket_id, rx_conf, mp);
 	if (error)
@@ -1474,7 +1477,7 @@ hn_xmit_pkts(void *ptxq, struct rte_mbuf **tx_pkts, uint16_t nb_pkts)
 	/* Transmit over VF if present and up */
 	rte_rwlock_read_lock(&hv->vf_lock);
 	vf_dev = hn_get_vf_dev(hv);
-	if (vf_dev && vf_dev->data->dev_started) {
+	if (hv->vf_ctx.vf_vsc_switched && vf_dev && vf_dev->data->dev_started) {
 		void *sub_q = vf_dev->data->tx_queues[queue_id];
 
 		nb_tx = (*vf_dev->tx_pkt_burst)(sub_q, tx_pkts, nb_pkts);
@@ -1595,7 +1598,7 @@ hn_recv_pkts(void *prxq, struct rte_mbuf **rx_pkts, uint16_t nb_pkts)
 	/* If VF is available, check that as well */
 	rte_rwlock_read_lock(&hv->vf_lock);
 	vf_dev = hn_get_vf_dev(hv);
-	if (vf_dev && vf_dev->data->dev_started)
+	if (hv->vf_ctx.vf_vsc_switched && vf_dev && vf_dev->data->dev_started)
 		nb_rcv += hn_recv_vf(vf_dev->data->port_id, rxq,
 				     rx_pkts + nb_rcv, nb_pkts - nb_rcv);
 
