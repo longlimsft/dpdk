@@ -400,6 +400,7 @@ mlx4_dev_close(struct rte_eth_dev *dev)
 		MLX4_ASSERT(priv->ctx == NULL);
 	mlx4_intr_uninstall(priv);
 	memset(priv, 0, sizeof(*priv));
+	dev->data->mac_addrs = NULL;
 }
 
 static const struct eth_dev_ops mlx4_dev_ops = {
