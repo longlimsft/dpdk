@@ -196,6 +196,9 @@ int hn_vf_add(struct rte_eth_dev *dev, struct hn_data *hv)
 {
 	int port, ret;
 
+	if (!hv->vf_ctx.vf_vsp_reported || hv->vf_ctx.vf_vsc_switched)
+		return 0;
+
 	rte_rwlock_write_lock(&hv->vf_lock);
 	port = hn_vf_match(dev);
 	if (port < 0) {
@@ -255,6 +258,11 @@ static void hn_vf_remove(struct hn_data *hv)
 {
 	int ret;
 
+	if (!hv->vf_ctx.vf_vsc_switched) {
+		PMD_DRV_LOG(ERR, "VF path not active");
+		return;
+	}
+
 	rte_rwlock_write_lock(&hv->vf_lock);
 	if (!hv->vf_ctx.vf_vsc_switched) {
 		PMD_DRV_LOG(ERR, "VF path not active");
@@ -293,7 +301,6 @@ hn_nvs_handle_vfassoc(struct rte_eth_dev *dev,
 		    vf_assoc->allocated ? "add to" : "remove from",
 		    dev->data->port_id);
 
-	rte_rwlock_write_lock(&hv->vf_lock);
 	hv->vf_ctx.vf_vsp_reported = vf_assoc->allocated;
 
 	if (dev->state == RTE_ETH_DEV_ATTACHED) {
@@ -302,7 +309,6 @@ hn_nvs_handle_vfassoc(struct rte_eth_dev *dev,
 		else
 			hn_vf_remove(hv);
 	}
-	rte_rwlock_write_unlock(&hv->vf_lock);
 }
 
 static void
