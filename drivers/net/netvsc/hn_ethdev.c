@@ -9,6 +9,10 @@
 #include <stdio.h>
 #include <errno.h>
 #include <unistd.h>
+#include <dirent.h>
+#include <net/if.h>
+#include <net/if_arp.h>
+#include <sys/ioctl.h>
 
 #include <rte_ethdev.h>
 #include <rte_memcpy.h>
@@ -532,14 +536,63 @@ static void netvsc_hotplug_retry(void *args)
 {
 	int ret;
 	struct hn_data *hv = args;
+	struct rte_eth_dev *dev = &rte_eth_devices[hv->port_id];
 	struct rte_devargs *d = &hv->devargs;
+	char buf[256];
 
-	if (hv->eal_hot_plug_retry++ < 5) {
-		ret = rte_eal_hotplug_add(d->bus->name, d->name, d->args);
-		if (ret == -ENODEV)
-			// try again
-			rte_eal_alarm_set(1000000, netvsc_hotplug_retry, hv);
+	DIR *di;
+	struct dirent *dir;
+	struct ifreq req;
+	struct rte_ether_addr eth_addr;
+	int s;
+
+	/* retry up to 5 times */
+	if (hv->eal_hot_plug_retry++ > 5)
+		return;
+
+	snprintf(buf, sizeof(buf), "/sys/bus/pci/devices/%s/net", d->name);
+	di = opendir(buf);
+	if(!di) {
+		PMD_DRV_LOG(DEBUG, "Can't open directory %s, retrying in 1s\n", buf);
+		goto retry;
 	}
+
+	while((dir = readdir(di))) {
+		/* Skip . and .. directories */
+		if(!strcmp(dir->d_name, ".") || !strcmp(dir->d_name, ".."))
+			continue;
+
+		/* trying to get mac address if this is a network device*/
+		s = socket(PF_INET, SOCK_DGRAM, IPPROTO_IP);
+		if (s == -1) {
+			PMD_DRV_LOG(ERR, "Faield to create socket errno %d\n", errno);
+			closedir(di);
+			return;
+		}
+		strlcpy(req.ifr_name, dir->d_name, sizeof(req.ifr_name));
+		ret = ioctl(s, SIOCGIFHWADDR, &req);
+		close(s);
+		if (ret == -1) {
+			PMD_DRV_LOG(ERR, "Failed to send SIOCGIFHWADDR for device %s\n", dir->d_name);
+			continue;
+		}
+		if (req.ifr_hwaddr.sa_family != ARPHRD_ETHER)
+			continue;
+		memcpy(eth_addr.addr_bytes, req.ifr_hwaddr.sa_data, RTE_DIM(eth_addr.addr_bytes));
+
+		if (rte_is_same_ether_addr(&eth_addr, dev->data->mac_addrs)) {
+			PMD_DRV_LOG(NOTICE, "Found matching MAC address, adding device %s network name %s\n", d->name, dir->d_name);
+			ret = rte_eal_hotplug_add(d->bus->name, d->name, d->args);
+			if (ret)
+				PMD_DRV_LOG(ERR, "Failed to add PCI device %s\n", d->name);
+		}
+		/* We either added the device, or its MAC address does not match */
+		closedir(di);
+		return;
+	}
+retry:
+	/* The device is still being initialized, retry after 1s*/
+	rte_eal_alarm_set(1000000, netvsc_hotplug_retry, hv);
 }
 
 static void
@@ -566,18 +619,9 @@ netvsc_hotadd_callback(const char *device_name,
 				return;
 			}
 
-			printf("%s: bus_name %s name %s args %s\n", __func__, d->bus->name, d->name, d->args);
-
-			// TODO test if this is a net device with the same mac address as mine, if no this is not our VF just return
-
-			ret = rte_eal_hotplug_add(d->bus->name, d->name, d->args);
-			if (ret == -ENODEV) {
-				// try again
+			if (!strcmp(d->bus->name, "pci")) {
+				hv->eal_hot_plug_retry = 0;
 				rte_eal_alarm_set(1000000, netvsc_hotplug_retry, hv);
-			} else if (ret < 0) {
-				PMD_DRV_LOG(ERR, "%s: device probe failed ret %d rte_errno %d\n", __func__, ret, rte_errno);
-
-				return;
 			}
 
 			// We will switch to VF on RDNIS configure message
