@@ -233,7 +233,6 @@ int hn_vf_add(struct rte_eth_dev *dev, struct hn_data *hv)
 			PMD_DRV_LOG(ERR, "failed to configure VF queues port %d\n", port);
 			goto exit;
 		}
-		hv->vf_ctx.vf_state = vf_configured;
 
 		PMD_DRV_LOG(NOTICE, "starting VF port %d\n", port);
 		ret = rte_eth_dev_start(port);
@@ -393,17 +392,30 @@ int _hn_vf_configure(struct rte_eth_dev *dev,
 			RTE_ETH_EVENT_INTR_RMV,
 			hn_eth_rmv_event_callback,
 			hv);
-		if (ret)
+		if (ret) {
 			PMD_DRV_LOG(ERR,
 				    "registering callback failed for vf port %d ret %d\n", hv->vf_ctx.vf_port, ret);
+			return ret;
+		}
 
 		ret = rte_eth_dev_configure(hv->vf_ctx.vf_port,
 					    dev->data->nb_rx_queues,
 					    dev->data->nb_tx_queues,
 					    &vf_conf);
-		if (ret)
+		if (ret) {
 			PMD_DRV_LOG(ERR,
 				    "VF configuration failed: %d", ret);
+
+			rte_eth_dev_callback_unregister(
+				hv->vf_ctx.vf_port,
+				RTE_ETH_EVENT_INTR_RMV,
+				hn_eth_rmv_event_callback,
+				hv);
+
+			return ret;
+		}
+
+		hv->vf_ctx.vf_state = vf_configured;
 	}
 
 	return ret;
@@ -421,8 +433,6 @@ int hn_vf_configure(struct rte_eth_dev *dev,
 
 	rte_rwlock_write_lock(&hv->vf_lock);
 	ret = _hn_vf_configure(dev, dev_conf);
-	if (!ret)
-		hv->vf_ctx.vf_state = vf_configured;
 	rte_rwlock_write_unlock(&hv->vf_lock);
 
 	return ret;

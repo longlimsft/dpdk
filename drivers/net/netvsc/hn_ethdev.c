@@ -546,6 +546,8 @@ static void netvsc_hotplug_retry(void *args)
 	struct rte_ether_addr eth_addr;
 	int s;
 
+	PMD_DRV_LOG(DEBUG, "Retry count %d\n", hv->eal_hot_plug_retry);
+
 	/* retry up to 5 times */
 	if (hv->eal_hot_plug_retry++ > 5)
 		return;
@@ -608,7 +610,6 @@ netvsc_hotadd_callback(const char *device_name,
 
 	switch (type) {
 		case RTE_DEV_EVENT_ADD:
-
 			// if we already has a VF, don't bother
 			if (hv->vf_ctx.vf_state > vf_removed)
 				break;
