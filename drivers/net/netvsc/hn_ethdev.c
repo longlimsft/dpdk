@@ -708,7 +708,7 @@ static int hn_dev_configure(struct rte_eth_dev *dev)
 		}
 	}
 
-	return hn_vf_configure(dev, dev_conf);
+	return hn_vf_configure_locked(dev, dev_conf);
 }
 
 static int hn_dev_stats_get(struct rte_eth_dev *dev,

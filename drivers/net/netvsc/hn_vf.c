@@ -53,37 +53,44 @@ static int hn_vf_match(const struct rte_eth_dev *dev)
 /*
  * Attach new PCI VF device and return the port_id
  */
-static int hn_vf_attach(struct hn_data *hv, uint16_t port_id)
+static int hn_vf_attach(struct rte_eth_dev *dev, struct hn_data *hv)
 {
 	struct rte_eth_dev_owner owner = { .id = RTE_ETH_DEV_NO_OWNER };
-	int ret;
+	int port, ret;
 
 	if (hv->vf_ctx.vf_attached) {
 		PMD_DRV_LOG(ERR, "VF already attached");
-		return -EEXIST;
+		return 0;
 	}
 
-	ret = rte_eth_dev_owner_get(port_id, &owner);
+	port = hn_vf_match(dev);
+	if (port < 0) {
+		PMD_DRV_LOG(NOTICE, "Couldn't find port for VF");
+		return port;
+	}
+
+	PMD_DRV_LOG(NOTICE, "found matching VF port %d\n", port);
+	ret = rte_eth_dev_owner_get(port, &owner);
 	if (ret < 0) {
-		PMD_DRV_LOG(ERR, "Can not find owner for port %d", port_id);
+		PMD_DRV_LOG(ERR, "Can not find owner for port %d", port);
 		return ret;
 	}
 
 	if (owner.id != RTE_ETH_DEV_NO_OWNER) {
 		PMD_DRV_LOG(ERR, "Port %u already owned by other device %s",
-			    port_id, owner.name);
+			    port, owner.name);
 		return -EBUSY;
 	}
 
-	ret = rte_eth_dev_owner_set(port_id, &hv->owner);
+	ret = rte_eth_dev_owner_set(port, &hv->owner);
 	if (ret < 0) {
-		PMD_DRV_LOG(ERR, "Can set owner for port %d", port_id);
+		PMD_DRV_LOG(ERR, "Can set owner for port %d", port);
 		return ret;
 	}
 
-	PMD_DRV_LOG(DEBUG, "Attach VF device %u", port_id);
+	PMD_DRV_LOG(DEBUG, "Attach VF device %u", port);
 	hv->vf_ctx.vf_attached = true;
-	hv->vf_ctx.vf_port = port_id;
+	hv->vf_ctx.vf_port = port;
 	return 0;
 }
 
@@ -188,41 +195,39 @@ static void hn_vf_add_retry(void *args)
 	hn_vf_add(dev, hv);
 }
 
-int _hn_vf_configure(struct rte_eth_dev *dev,
+int hn_vf_configure(struct rte_eth_dev *dev,
 		    const struct rte_eth_conf *dev_conf);
 
 /* Add new VF device to synthetic device */
 int hn_vf_add(struct rte_eth_dev *dev, struct hn_data *hv)
 {
-	int port, ret;
+	int ret, port;
 
 	if (!hv->vf_ctx.vf_vsp_reported || hv->vf_ctx.vf_vsc_switched)
 		return 0;
 
 	rte_rwlock_write_lock(&hv->vf_lock);
-	port = hn_vf_match(dev);
-	if (port < 0) {
+
+	ret = hn_vf_attach(dev, hv);
+	if (ret) {
 		PMD_DRV_LOG(NOTICE, "RNDIS reports VF but device not found, retrying");
 		rte_eal_alarm_set(1000000, hn_vf_add_retry, dev);
-		ret = port;
 		goto exit;
 	}
 
-	PMD_DRV_LOG(NOTICE, "found matching VF port %d\n", port);
-	hv->vf_ctx.vf_state = vf_probed;
+	port = hv->vf_ctx.vf_port;
+	/*
+	 * If the primary device has started, this is a VF host add.
+	 * Configure and start VF device.
+	 */
+	if (dev->data->dev_started) {
+		if (rte_eth_devices[port].data->dev_started) {
+			PMD_DRV_LOG(ERR, "Internal error: VF already started on hot add");
+			goto exit;
+		}
 
-	ret = hn_vf_attach(hv, port);
-	if (ret)
-		goto exit;
-
-	if (dev->data->dev_started &&
-			!rte_eth_devices[port].data->dev_started) {
-		/*
-		 * The primary device has started but VF is not started.
-		 * This is a VF hot add. Start VF device
-		 */
 		PMD_DRV_LOG(NOTICE, "configuring VF port %d\n", port);
-		ret = _hn_vf_configure(dev, &dev->data->dev_conf);
+		ret = hn_vf_configure(dev, &dev->data->dev_conf);
 		if (ret) {
 			PMD_DRV_LOG(ERR, "failed to configure VF port %d\n", port);
 			goto exit;
@@ -252,7 +257,7 @@ exit:
 	return ret;
 }
 
-/* Remove new VF device */
+/* Switch data path to VF device */
 static void hn_vf_remove(struct hn_data *hv)
 {
 	int ret;
@@ -268,15 +273,8 @@ static void hn_vf_remove(struct hn_data *hv)
 	} else {
 		/* Stop incoming packets from arriving on VF */
 		ret = hn_nvs_set_datapath(hv, NVS_DATAPATH_SYNTHETIC);
-
 		if (ret == 0)
 			hv->vf_ctx.vf_vsc_switched = false;
-
-		/* Give back ownership */
-//		rte_eth_dev_owner_unset(hv->vf_port, hv->owner.id);
-
-		/* Stop transmission over VF */
-//		hv->vf_port = HN_INVALID_PORT;
 	}
 	rte_rwlock_write_unlock(&hv->vf_lock);
 }
@@ -374,7 +372,7 @@ int hn_vf_info_get(struct hn_data *hv, struct rte_eth_dev_info *info)
 	return ret;
 }
 
-int _hn_vf_configure(struct rte_eth_dev *dev,
+int hn_vf_configure(struct rte_eth_dev *dev,
 		    const struct rte_eth_conf *dev_conf)
 {
 	struct hn_data *hv = dev->data->dev_private;
@@ -425,14 +423,14 @@ int _hn_vf_configure(struct rte_eth_dev *dev,
  * Configure VF if present.
  * Force VF to have same number of queues as synthetic device
  */
-int hn_vf_configure(struct rte_eth_dev *dev,
+int hn_vf_configure_locked(struct rte_eth_dev *dev,
 		    const struct rte_eth_conf *dev_conf)
 {
 	struct hn_data *hv = dev->data->dev_private;
 	int ret = 0;
 
 	rte_rwlock_write_lock(&hv->vf_lock);
-	ret = _hn_vf_configure(dev, dev_conf);
+	ret = hn_vf_configure(dev, dev_conf);
 	rte_rwlock_write_unlock(&hv->vf_lock);
 
 	return ret;
