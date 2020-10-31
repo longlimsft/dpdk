@@ -50,6 +50,7 @@ int hn_logtype_driver;
 #define NETVSC_ARG_LATENCY "latency"
 #define NETVSC_ARG_RXBREAK "rx_copybreak"
 #define NETVSC_ARG_TXBREAK "tx_copybreak"
+#define NETVSC_ARG_RX_EXTMBUF_ENABLE "rx_extmbuf_enable"
 
 struct hn_xstats_name_off {
 	char name[RTE_ETH_XSTATS_NAME_SIZE];
@@ -169,6 +170,10 @@ static int hn_set_parameter(const char *key, const char *value, void *opaque)
 		hv->tx_copybreak = v;
 		PMD_DRV_LOG(DEBUG, "tx copy break set to %u",
 			    hv->tx_copybreak);
+	} else if (!strcmp(key, NETVSC_ARG_RX_EXTMBUF_ENABLE)) {
+		hv->rx_extmbuf_enable = v;
+		PMD_DRV_LOG(DEBUG, "rx extmbuf enable set to %u",
+			    hv->rx_extmbuf_enable);
 	}
 
 	return 0;
@@ -183,6 +188,7 @@ static int hn_parse_args(const struct rte_eth_dev *dev)
 		NETVSC_ARG_LATENCY,
 		NETVSC_ARG_RXBREAK,
 		NETVSC_ARG_TXBREAK,
+		NETVSC_ARG_RX_EXTMBUF_ENABLE,
 		NULL
 	};
 	struct rte_kvargs *kvlist;
@@ -976,6 +982,7 @@ eth_hn_dev_init(struct rte_eth_dev *eth_dev)
 	hv->latency = HN_CHAN_LATENCY_NS;
 	hv->rx_copybreak = HN_RXCOPY_THRESHOLD;
 	hv->tx_copybreak = HN_TXCOPY_THRESHOLD;
+	hv->rx_extmbuf_enable = HN_RX_EXTMBUF_ENABLE;
 	hv->max_queues = 1;
 
 	rte_rwlock_init(&hv->vf_lock);
@@ -1139,4 +1146,5 @@ RTE_PMD_REGISTER_KMOD_DEP(net_netvsc, "* uio_hv_generic");
 RTE_PMD_REGISTER_PARAM_STRING(net_netvsc,
 			      NETVSC_ARG_LATENCY "=<uint32> "
 			      NETVSC_ARG_RXBREAK "=<uint32> "
-			      NETVSC_ARG_TXBREAK "=<uint32>");
+			      NETVSC_ARG_TXBREAK "=<uint32> "
+			      NETVSC_ARG_RX_EXTMBUF_ENABLE "=<0|1>");
