@@ -569,7 +569,7 @@ hn_nvs_alloc_subchans(struct hn_data *hv, uint32_t *nsubch)
 	return 0;
 }
 
-void
+int
 hn_nvs_set_datapath(struct hn_data *hv, uint32_t path)
 {
 	struct hn_nvs_datapath dp;
@@ -588,4 +588,6 @@ hn_nvs_set_datapath(struct hn_data *hv, uint32_t path)
 			    "send set datapath failed: %d",
 			    error);
 	}
+
+	return error;
 }
