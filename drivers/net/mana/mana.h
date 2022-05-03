@@ -427,6 +427,7 @@ struct mana_rxq {
 	uint32_t num_desc;
 	struct rte_mempool *mp;
 	struct ibv_cq *cq;
+	struct ibv_comp_channel *channel;
 	struct ibv_wq *wq;
 
 	/* For storing pending requests */
@@ -460,8 +461,8 @@ extern int mana_logtype_init;
 #define PMD_INIT_FUNC_TRACE() PMD_INIT_LOG(DEBUG, " >>")
 
 int mana_ring_doorbell(void *db_page, enum gdma_queue_types queue_type,
-		       uint32_t queue_id, uint32_t tail);
-int mana_rq_ring_doorbell(struct mana_rxq *rxq);
+		       uint32_t queue_id, uint32_t tail, uint8_t arm);
+int mana_rq_ring_doorbell(struct mana_rxq *rxq, uint8_t arm);
 
 int gdma_post_work_request(struct mana_gdma_queue *queue,
 			   struct gdma_work_request *work_req,
@@ -495,6 +496,10 @@ int mana_new_pmd_mr(struct mana_mr_btree *local_tree, struct mana_priv *priv,
 		    struct rte_mempool *pool);
 void mana_remove_all_mr(struct mana_priv *priv);
 void mana_del_pmd_mr(struct mana_mr_cache *mr);
+
+void mana_intr_handler(void *arg);
+int mana_intr_install(struct rte_eth_dev *eth_dev, struct mana_priv *priv);
+int mana_intr_uninstall(struct mana_priv *priv);
 
 void mana_mempool_chunk_cb(struct rte_mempool *mp, void *opaque,
 			   struct rte_mempool_memhdr *memhdr, unsigned int idx);
@@ -540,5 +545,9 @@ void mana_mp_req_on_rxtx(struct rte_eth_dev *dev, enum mana_mp_req_type type);
 
 void *mana_alloc_verbs_buf(size_t size, void *data);
 void mana_free_verbs_buf(void *ptr, void *data __rte_unused);
+
+int mana_rx_intr_enable(struct rte_eth_dev *dev, uint16_t rx_queue_id);
+int mana_rx_intr_disable(struct rte_eth_dev *dev, uint16_t rx_queue_id);
+int mana_fd_set_non_blocking(int fd);
 
 #endif
