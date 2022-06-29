@@ -42,6 +42,8 @@
 #include <rte_string_fns.h>
 #include <rte_cycles.h>
 
+#include "/home/ajay/workspace/mana_dpdk/lib/ethdev/ethdev_driver.h"
+
 #define RTE_LOGTYPE_APP RTE_LOGTYPE_USER1
 
 #define NB_MBUFS 64*1024 /* use 64k mbufs */
@@ -261,8 +263,10 @@ smp_port_init(uint16_t port, struct rte_mempool *mbuf_pool,
 	}
 
 	retval = rte_eth_promiscuous_enable(port);
-	if (retval != 0)
-		return retval;
+	if (retval != 0) {
+		printf("warning: failed to enable promisc mode ret %d\n", retval);
+//		return retval;
+	}
 
 	retval  = rte_eth_dev_start(port);
 	if (retval < 0)
@@ -342,6 +346,14 @@ lcore_main(void *arg __rte_unused)
 			if (rx_c == 0)
 				continue;
 			pstats[src].rx += rx_c;
+
+			for (i=0; i < rx_c; i++) {
+				extern struct rte_eth_dev rte_eth_devices[];
+				struct rte_mbuf *mb = buf[i];
+				struct rte_ether_hdr *eth_hdr = rte_pktmbuf_mtod(mb, struct rte_ether_hdr *);
+				struct rte_eth_dev *dev = &rte_eth_devices[dst];
+				rte_ether_addr_copy(dev->data->mac_addrs, &eth_hdr->src_addr);
+			}
 
 			const uint16_t tx_c = rte_eth_tx_burst(dst, q_id, buf, rx_c);
 			pstats[dst].tx += tx_c;
