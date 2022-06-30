@@ -364,6 +364,7 @@ extern int mana_logtype_init;
 
 int mana_ring_doorbell(void *db_page, enum gdma_queue_types queue_type,
 		       uint32_t queue_id, uint32_t tail);
+int mana_rq_ring_doorbell(struct mana_rxq *rxq);
 
 int gdma_post_work_request(struct mana_gdma_queue *queue,
 			   struct gdma_work_request *work_req,
@@ -379,8 +380,10 @@ uint16_t mana_tx_burst_removed(void *dpdk_rxq, struct rte_mbuf **pkts,
 int gdma_poll_completion_queue(struct mana_gdma_queue *cq,
 			       struct gdma_comp *comp);
 
+int mana_start_rx_queues(struct rte_eth_dev *dev);
 int mana_start_tx_queues(struct rte_eth_dev *dev);
 
+int mana_stop_rx_queues(struct rte_eth_dev *dev);
 int mana_stop_tx_queues(struct rte_eth_dev *dev);
 
 struct mana_mr_cache *mana_find_pmd_mr(struct mana_mr_btree *local_tree,
