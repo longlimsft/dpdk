@@ -12,6 +12,7 @@ deps += ['pci', 'bus_pci', 'net', 'eal', 'kvargs']
 sources += files(
 	'mana.c',
 	'mr.c',
+	'gdma.c',
 	'mp.c',
 )
 
