@@ -991,6 +991,8 @@ mana_pci_probe_mac(struct rte_pci_device *pci_dev,
 				/* fd is no not used after mapping doorbell */
 				close(fd);
 
+				eth_dev->rx_pkt_burst = mana_rx_burst;
+
 				rte_spinlock_lock(&mana_shared_data->lock);
 				mana_shared_data->secondary_cnt++;
 				mana_local_data.secondary_cnt++;
