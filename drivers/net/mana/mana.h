@@ -378,6 +378,10 @@ uint16_t mana_tx_burst_removed(void *dpdk_rxq, struct rte_mbuf **pkts,
 int gdma_poll_completion_queue(struct mana_gdma_queue *cq,
 			       struct gdma_comp *comp);
 
+int mana_start_tx_queues(struct rte_eth_dev *dev);
+
+int mana_stop_tx_queues(struct rte_eth_dev *dev);
+
 struct mana_mr_cache *mana_find_pmd_mr(struct mana_mr_btree *local_tree,
 				       struct mana_priv *priv,
 				       struct rte_mbuf *mbuf);
