@@ -168,8 +168,6 @@ extern int mana_logtype_init;
 
 #define PMD_INIT_FUNC_TRACE() PMD_INIT_LOG(DEBUG, " >>")
 
-const uint32_t *mana_supported_ptypes(struct rte_eth_dev *dev);
-
 uint16_t mana_rx_burst_removed(void *dpdk_rxq, struct rte_mbuf **pkts,
 			       uint16_t pkts_n);
 
