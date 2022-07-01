@@ -207,4 +207,7 @@ int mana_mp_req_verbs_cmd_fd(struct rte_eth_dev *dev);
 
 void mana_mp_req_on_rxtx(struct rte_eth_dev *dev, enum mana_mp_req_type type);
 
+void *mana_alloc_verbs_buf(size_t size, void *data);
+void mana_free_verbs_buf(void *ptr, void *data __rte_unused);
+
 #endif
