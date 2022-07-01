@@ -72,6 +72,7 @@ struct mana_priv {
 	uint8_t ind_table_key[40];
 	struct ibv_qp *rwq_qp;
 	void *db_page;
+	struct rte_eth_rss_conf rss_conf;
 	struct rte_intr_handle *intr_handle;
 	int max_rx_queues;
 	int max_tx_queues;
