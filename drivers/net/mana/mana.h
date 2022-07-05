@@ -50,6 +50,22 @@ struct mana_shared_data {
 #define MAX_RECEIVE_BUFFERS_PER_QUEUE	256
 #define MAX_SEND_BUFFERS_PER_QUEUE	256
 
+struct mana_mr_cache {
+	uint32_t	lkey;
+	uintptr_t	addr;
+	size_t		len;
+	void		*verb_obj;
+};
+
+#define MANA_MR_BTREE_CACHE_N	512
+struct mana_mr_btree {
+	uint16_t	len;	/* Used entries */
+	uint16_t	size;	/* Total entries */
+	int		overflow;
+	int		socket;
+	struct mana_mr_cache *table;
+};
+
 struct mana_process_priv {
 	void *db_page;
 };
@@ -82,6 +98,8 @@ struct mana_priv {
 	int max_recv_sge;
 	int max_mr;
 	uint64_t max_mr_size;
+	struct mana_mr_btree mr_btree;
+	rte_spinlock_t	mr_btree_lock;
 };
 
 struct mana_txq_desc {
@@ -131,6 +149,7 @@ struct mana_txq {
 	uint32_t desc_ring_head, desc_ring_tail;
 
 	struct mana_stats stats;
+	struct mana_mr_btree mr_btree;
 	unsigned int socket;
 };
 
@@ -153,6 +172,7 @@ struct mana_rxq {
 	struct mana_gdma_queue gdma_cq;
 
 	struct mana_stats stats;
+	struct mana_mr_btree mr_btree;
 
 	unsigned int socket;
 };
@@ -175,6 +195,24 @@ uint16_t mana_rx_burst_removed(void *dpdk_rxq, struct rte_mbuf **pkts,
 
 uint16_t mana_tx_burst_removed(void *dpdk_rxq, struct rte_mbuf **pkts,
 			       uint16_t pkts_n);
+
+struct mana_mr_cache *mana_find_pmd_mr(struct mana_mr_btree *local_tree,
+				       struct mana_priv *priv,
+				       struct rte_mbuf *mbuf);
+int mana_new_pmd_mr(struct mana_mr_btree *local_tree, struct mana_priv *priv,
+		    struct rte_mempool *pool);
+void mana_remove_all_mr(struct mana_priv *priv);
+void mana_del_pmd_mr(struct mana_mr_cache *mr);
+
+void mana_mempool_chunk_cb(struct rte_mempool *mp, void *opaque,
+			   struct rte_mempool_memhdr *memhdr, unsigned int idx);
+
+struct mana_mr_cache *mana_mr_btree_lookup(struct mana_mr_btree *bt,
+					   uint16_t *idx,
+					   uintptr_t addr, size_t len);
+int mana_mr_btree_insert(struct mana_mr_btree *bt, struct mana_mr_cache *entry);
+int mana_mr_btree_init(struct mana_mr_btree *bt, int n, int socket);
+void mana_mr_btree_free(struct mana_mr_btree *bt);
 
 /** Request timeout for IPC. */
 #define MANA_MP_REQ_TIMEOUT_SEC 5
@@ -204,6 +242,7 @@ int mana_mp_init_secondary(void);
 void mana_mp_uninit_primary(void);
 void mana_mp_uninit_secondary(void);
 int mana_mp_req_verbs_cmd_fd(struct rte_eth_dev *dev);
+int mana_mp_req_mr_create(struct mana_priv *priv, uintptr_t addr, uint32_t len);
 
 void mana_mp_req_on_rxtx(struct rte_eth_dev *dev, enum mana_mp_req_type type);
 
