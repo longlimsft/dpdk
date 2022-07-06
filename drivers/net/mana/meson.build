@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # Copyright(c) 2022 Microsoft Corporation
 
-if not is_linux or dpdk_conf.get('RTE_ARCH_X86_64') != 1
+if not is_linux or not dpdk_conf.has('RTE_ARCH_X86_64')
     build = false
     reason = 'mana is supported on Linux X86_64'
     subdir_done()
