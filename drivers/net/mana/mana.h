@@ -447,6 +447,12 @@ extern int mana_logtype_init;
 	rte_log(RTE_LOG_ ## level, mana_logtype_driver, "%s(): " fmt "\n", \
 		__func__, ## args)
 
+#ifdef RTE_LIBRTE_MANA_DEBUG
+#define MANA_DEBUG(ftm, args...) DRV_LOG(DEBUG, fmt, args...)
+#else
+#define MANA_DEBUG(ftm, args...)
+#endif
+
 #define PMD_INIT_LOG(level, fmt, args...) \
 	rte_log(RTE_LOG_ ## level, mana_logtype_init, "%s(): " fmt "\n",\
 		__func__, ## args)

@@ -97,7 +97,7 @@ mana_alloc_and_post_rx_wqe(struct mana_rxq *rxq)
 		desc->wqe_size_in_bu = wqe_info.wqe_size_in_bu;
 		rxq->desc_ring_head = (rxq->desc_ring_head + 1) % rxq->num_desc;
 	} else {
-		DRV_LOG(ERR, "failed to post recv ret %d", ret);
+		MANA_DEBUG("failed to post recv ret %d", ret);
 		return ret;
 	}
 
@@ -411,7 +411,7 @@ mana_rx_burst(void *dpdk_rxq, struct rte_mbuf **pkts, uint16_t pkts_n)
 			break;
 
 		case CQE_RX_TRUNCATED:
-			DRV_LOG(ERR, "Drop a truncated packet");
+			MANA_DEBUG("Drop a truncated packet");
 			rxq->stats.errors++;
 			rte_pktmbuf_free(mbuf);
 			goto drop;
@@ -426,7 +426,7 @@ mana_rx_burst(void *dpdk_rxq, struct rte_mbuf **pkts, uint16_t pkts_n)
 			continue;
 		}
 
-		DRV_LOG(DEBUG, "mana_rx_comp_oob CQE_RX_OKAY rxq %p", rxq);
+		MANA_DEBUG("mana_rx_comp_oob CQE_RX_OKAY rxq %p", rxq);
 
 		mbuf->data_off = RTE_PKTMBUF_HEADROOM;
 		mbuf->nb_segs = 1;
@@ -490,8 +490,8 @@ mana_arm_cq(struct mana_rxq *rxq, uint8_t arm)
 	uint32_t head = rxq->gdma_cq.head %
 		(rxq->gdma_cq.count << COMPLETION_QUEUE_ENTRY_OWNER_BITS_SIZE);
 
-	DRV_LOG(ERR, "Ringing completion queue ID %u head %u arm %d",
-		rxq->gdma_cq.id, head, arm);
+	MANA_DEBUG("Ringing completion queue ID %u head %u arm %d",
+		   rxq->gdma_cq.id, head, arm);
 
 	return mana_ring_doorbell(priv->db_page, GDMA_QUEUE_COMPLETION,
 				  rxq->gdma_cq.id, head, arm);

@@ -188,7 +188,7 @@ mana_tx_burst(void *dpdk_txq, struct rte_mbuf **tx_pkts, uint16_t nb_pkts)
 				oob->cqe_hdr.cqe_type, oob->cqe_hdr.vendor_err);
 			txq->stats.errors++;
 		} else {
-			DRV_LOG(DEBUG, "mana_tx_comp_oob CQE_TX_OKAY");
+			MANA_DEBUG("mana_tx_comp_oob CQE_TX_OKAY");
 			txq->stats.packets++;
 		}
 
@@ -310,20 +310,20 @@ mana_tx_burst(void *dpdk_txq, struct rte_mbuf **tx_pkts, uint16_t nb_pkts)
 			get_vsq_frame_num(txq->gdma_sq.id);
 		tx_oob.short_oob.short_vport_offset = txq->tx_vp_offset;
 
-		DRV_LOG(DEBUG, "tx_oob packet_format %u ipv4 %u ipv6 %u",
-			tx_oob.short_oob.packet_format,
-			tx_oob.short_oob.tx_is_outer_ipv4,
-			tx_oob.short_oob.tx_is_outer_ipv6);
+		MANA_DEBUG("tx_oob packet_format %u ipv4 %u ipv6 %u",
+			   tx_oob.short_oob.packet_format,
+			   tx_oob.short_oob.tx_is_outer_ipv4,
+			   tx_oob.short_oob.tx_is_outer_ipv6);
 
-		DRV_LOG(DEBUG, "tx_oob checksum ip %u tcp %u udp %u offset %u",
-			tx_oob.short_oob.tx_compute_IP_header_checksum,
-			tx_oob.short_oob.tx_compute_TCP_checksum,
-			tx_oob.short_oob.tx_compute_UDP_checksum,
-			tx_oob.short_oob.tx_transport_header_offset);
+		MANA_DEBUG("tx_oob checksum ip %u tcp %u udp %u offset %u",
+			   tx_oob.short_oob.tx_compute_IP_header_checksum,
+			   tx_oob.short_oob.tx_compute_TCP_checksum,
+			   tx_oob.short_oob.tx_compute_UDP_checksum,
+			   tx_oob.short_oob.tx_transport_header_offset);
 
-		DRV_LOG(DEBUG, "pkt[%d]: buf_addr 0x%p, nb_segs %d, pkt_len %d",
-			pkt_idx, m_pkt->buf_addr, m_pkt->nb_segs,
-			m_pkt->pkt_len);
+		MANA_DEBUG("pkt[%d]: buf_addr 0x%p, nb_segs %d, pkt_len %d",
+			   pkt_idx, m_pkt->buf_addr, m_pkt->nb_segs,
+			   m_pkt->pkt_len);
 
 		/* Create SGL for packet data buffers */
 		for (seg_idx = 0; seg_idx < m_pkt->nb_segs; seg_idx++) {
@@ -342,7 +342,7 @@ mana_tx_burst(void *dpdk_txq, struct rte_mbuf **tx_pkts, uint16_t nb_pkts)
 			sgl.gdma_sgl[seg_idx].size = m_seg->data_len;
 			sgl.gdma_sgl[seg_idx].memory_key = mr->lkey;
 
-			DRV_LOG(DEBUG,
+			MANA_DEBUG(
 				"seg idx %u addr 0x%" PRIx64 " size %x key %x",
 				seg_idx, sgl.gdma_sgl[seg_idx].address,
 				sgl.gdma_sgl[seg_idx].size,
@@ -383,11 +383,11 @@ mana_tx_burst(void *dpdk_txq, struct rte_mbuf **tx_pkts, uint16_t nb_pkts)
 
 			pkt_sent++;
 
-			DRV_LOG(DEBUG, "nb_pkts %u pkt[%d] sent",
-				nb_pkts, pkt_idx);
+			MANA_DEBUG("nb_pkts %u pkt[%d] sent",
+				   nb_pkts, pkt_idx);
 		} else {
-			DRV_LOG(INFO, "pkt[%d] failed to post send ret %d",
-				pkt_idx, ret);
+			MANA_DEBUG("pkt[%d] failed to post send ret %d",
+				   pkt_idx, ret);
 			break;
 		}
 	}
