@@ -443,9 +443,13 @@ struct mana_rxq {
 extern int mana_logtype_driver;
 extern int mana_logtype_init;
 
+#ifdef MANA_DEBUG
 #define DRV_LOG(level, fmt, args...) \
 	rte_log(RTE_LOG_ ## level, mana_logtype_driver, "%s(): " fmt "\n", \
-		__func__, ## args)
+		__func__, ## args)a
+#else
+#define DRV_LOG(level, fmt, args...) do {} while (0)
+#endif
 
 #define PMD_INIT_LOG(level, fmt, args...) \
 	rte_log(RTE_LOG_ ## level, mana_logtype_init, "%s(): " fmt "\n",\
@@ -459,7 +463,8 @@ int mana_rq_ring_doorbell(struct mana_rxq *rxq, uint8_t arm);
 
 int gdma_post_work_request(struct mana_gdma_queue *queue,
 			   struct gdma_work_request *work_req,
-			   struct gdma_posted_wqe_info *wqe_info);
+//			   struct gdma_posted_wqe_info *wqe_info);
+			   uint32_t *wqe_size_in_bu);
 uint8_t *gdma_get_wqe_pointer(struct mana_gdma_queue *queue);
 
 uint16_t mana_rx_burst(void *dpdk_rxq, struct rte_mbuf **rx_pkts,
@@ -474,7 +479,8 @@ uint16_t mana_tx_burst_removed(void *dpdk_rxq, struct rte_mbuf **pkts,
 			       uint16_t pkts_n);
 
 int gdma_poll_completion_queue(struct mana_gdma_queue *cq,
-			       struct gdma_comp *comp);
+//			       struct gdma_comp *comp);
+			       void **comp);
 
 int mana_start_rx_queues(struct rte_eth_dev *dev);
 int mana_start_tx_queues(struct rte_eth_dev *dev);
