@@ -52,8 +52,8 @@ mana_alloc_and_post_rx_wqe(struct mana_rxq *rxq)
 {
 	struct rte_mbuf *mbuf = NULL;
 	struct gdma_sgl_element sgl[1];
-	struct gdma_work_request request = {0};
-	struct gdma_posted_wqe_info wqe_info = {0};
+	struct gdma_work_request request;
+	uint32_t wqe_size_in_bu;
 	struct mana_priv *priv = rxq->priv;
 	int ret;
 	struct mana_mr_cache *mr;
@@ -72,7 +72,6 @@ mana_alloc_and_post_rx_wqe(struct mana_rxq *rxq)
 	}
 
 	request.gdma_header.struct_size = sizeof(request);
-	wqe_info.gdma_header.struct_size = sizeof(wqe_info);
 
 	sgl[0].address = rte_cpu_to_le_64(rte_pktmbuf_mtod(mbuf, uint64_t));
 	sgl[0].memory_key = mr->lkey;
@@ -87,14 +86,14 @@ mana_alloc_and_post_rx_wqe(struct mana_rxq *rxq)
 	request.flags = 0;
 	request.client_data_unit = NOT_USING_CLIENT_DATA_UNIT;
 
-	ret = gdma_post_work_request(&rxq->gdma_rq, &request, &wqe_info);
+	ret = gdma_post_work_request(&rxq->gdma_rq, &request, &wqe_size_in_bu);
 	if (!ret) {
 		struct mana_rxq_desc *desc =
 			&rxq->desc_ring[rxq->desc_ring_head];
 
 		/* update queue for tracking pending packets */
 		desc->pkt = mbuf;
-		desc->wqe_size_in_bu = wqe_info.wqe_size_in_bu;
+		desc->wqe_size_in_bu = wqe_size_in_bu;
 		rxq->desc_ring_head = (rxq->desc_ring_head + 1) % rxq->num_desc;
 	} else {
 		DRV_LOG(ERR, "failed to post recv ret %d", ret);
@@ -384,22 +383,13 @@ mana_rx_burst(void *dpdk_rxq, struct rte_mbuf **pkts, uint16_t pkts_n)
 	uint8_t wqe_posted = 0;
 	struct mana_rxq *rxq = dpdk_rxq;
 	struct mana_priv *priv = rxq->priv;
-	struct gdma_comp comp;
 	struct rte_mbuf *mbuf;
 	int ret;
+	struct mana_rx_comp_oob *oob;
 
 	while (pkt_received < pkts_n &&
-	       gdma_poll_completion_queue(&rxq->gdma_cq, &comp) == 1) {
+	       gdma_poll_completion_queue(&rxq->gdma_cq, (void **)&oob) == 1) {
 		struct mana_rxq_desc *desc;
-		struct mana_rx_comp_oob *oob =
-			(struct mana_rx_comp_oob *)&comp.completion_data[0];
-
-		if (comp.work_queue_number != rxq->gdma_rq.id) {
-			DRV_LOG(ERR, "rxq comp id mismatch wqid=0x%x rcid=0x%x",
-				comp.work_queue_number, rxq->gdma_rq.id);
-			rxq->stats.errors++;
-			break;
-		}
 
 		desc = &rxq->desc_ring[rxq->desc_ring_tail];
 		rxq->gdma_rq.tail += desc->wqe_size_in_bu;

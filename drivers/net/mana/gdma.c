@@ -123,7 +123,7 @@ write_scatter_gather_list(uint8_t *work_queue_head_pointer,
 int
 gdma_post_work_request(struct mana_gdma_queue *queue,
 		       struct gdma_work_request *work_req,
-		       struct gdma_posted_wqe_info *wqe_info)
+		       uint32_t *wqe_size_in_bu)
 {
 	uint32_t client_oob_size =
 		work_req->inline_oob_size_in_bytes >
@@ -149,14 +149,7 @@ gdma_post_work_request(struct mana_gdma_queue *queue,
 	DRV_LOG(DEBUG, "client_oob_size %u sgl_data_size %u wqe_size %u",
 		client_oob_size, sgl_data_size, wqe_size);
 
-	if (wqe_info) {
-		wqe_info->wqe_index =
-			((queue->head * GDMA_WQE_ALIGNMENT_UNIT_SIZE) &
-			 (queue->size - 1)) / GDMA_WQE_ALIGNMENT_UNIT_SIZE;
-		wqe_info->unmasked_queue_offset = queue->head;
-		wqe_info->wqe_size_in_bu =
-			wqe_size / GDMA_WQE_ALIGNMENT_UNIT_SIZE;
-	}
+	*wqe_size_in_bu = wqe_size / GDMA_WQE_ALIGNMENT_UNIT_SIZE;
 
 	wq_buffer_pointer = gdma_get_wqe_pointer(queue);
 	wq_buffer_pointer += write_dma_client_oob(wq_buffer_pointer, work_req,
@@ -260,7 +253,7 @@ mana_ring_doorbell(void *db_page, enum gdma_queue_types queue_type,
  * Poll completion queue for completions.
  */
 int
-gdma_poll_completion_queue(struct mana_gdma_queue *cq, struct gdma_comp *comp)
+gdma_poll_completion_queue(struct mana_gdma_queue *cq, void **comp)
 {
 	struct gdma_hardware_completion_entry *cqe;
 	uint32_t head = cq->head % cq->count;
@@ -289,10 +282,7 @@ gdma_poll_completion_queue(struct mana_gdma_queue *cq, struct gdma_comp *comp)
 	/* Ensure checking owner bits happens before reading from CQE */
 	rte_rmb();
 
-	comp->work_queue_number = cqe->wq_num;
-	comp->send_work_queue = cqe->is_sq;
-
-	memcpy(comp->completion_data, cqe->dma_client_data, GDMA_COMP_DATA_SIZE);
+	*comp = cqe->dma_client_data;
 
 	cq->head++;
 
