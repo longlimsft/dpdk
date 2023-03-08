@@ -178,7 +178,7 @@ mana_tx_burst(void *dpdk_txq, struct rte_mbuf **tx_pkts, uint16_t nb_pkts)
 
 	/* Process send completions from GDMA */
 //	while (gdma_poll_completion_queue(&txq->gdma_cq, &comp) == 1) {
-	while (gdma_poll_completion_queue(&txq->gdma_cq, &oob) == 1) {
+	while (gdma_poll_completion_queue(&txq->gdma_cq, (void **) &oob) == 1) {
 		struct mana_txq_desc *desc =
 			&txq->desc_ring[txq->desc_ring_tail];
 //		struct mana_tx_comp_oob *oob =

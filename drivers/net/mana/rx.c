@@ -393,7 +393,7 @@ mana_rx_burst(void *dpdk_rxq, struct rte_mbuf **pkts, uint16_t pkts_n)
 	struct mana_rx_comp_oob *oob;
 
 	while (pkt_received < pkts_n &&
-	       gdma_poll_completion_queue(&rxq->gdma_cq, &oob) == 1) {
+	       gdma_poll_completion_queue(&rxq->gdma_cq, (void **)&oob) == 1) {
 		struct mana_rxq_desc *desc;
 //		struct mana_rx_comp_oob *oob =
 //			(struct mana_rx_comp_oob *)&comp.completion_data[0];
