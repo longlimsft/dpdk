@@ -385,13 +385,15 @@ mana_rx_burst(void *dpdk_rxq, struct rte_mbuf **pkts, uint16_t pkts_n)
 	struct mana_priv *priv = rxq->priv;
 	struct rte_mbuf *mbuf;
 	int ret;
-	struct mana_rx_comp_oob *oob;
+	uint32_t num_pkts;
 
-	while (pkt_received < pkts_n &&
-	       gdma_poll_completion_queue(&rxq->gdma_cq, (void **)&oob) == 1) {
-		struct mana_rxq_desc *desc;
+	num_pkts = gdma_poll_completion_queue(&rxq->gdma_cq, rxq->gdma_comp_buf, pkts_n);
+	for (uint32_t i = 0; i < num_pkts; i++) {
+		struct mana_rx_comp_oob *oob = (struct mana_rx_comp_oob *)
+			rxq->gdma_comp_buf[i].cqe_data;
+		struct mana_rxq_desc *desc =
+			&rxq->desc_ring[rxq->desc_ring_tail];
 
-		desc = &rxq->desc_ring[rxq->desc_ring_tail];
 		rxq->gdma_rq.tail += desc->wqe_size_in_bu;
 		mbuf = desc->pkt;
 

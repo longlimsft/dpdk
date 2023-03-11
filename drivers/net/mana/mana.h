@@ -142,6 +142,7 @@ struct gdma_header {
 #define COMPLETION_QUEUE_OWNER_MASK \
 	((1 << (COMPLETION_QUEUE_ENTRY_OWNER_BITS_SIZE)) - 1)
 
+#ifdef MANA_DEBUG
 struct gdma_comp {
 	struct gdma_header gdma_header;
 
@@ -154,6 +155,7 @@ struct gdma_comp {
 	/* Filled by GDMA core */
 	bool send_work_queue;
 };
+#endif
 
 struct gdma_hardware_completion_entry {
 	char dma_client_data[GDMA_COMP_DATA_SIZE];
@@ -391,6 +393,10 @@ struct mana_gdma_queue {
 
 #define MANA_MR_BTREE_PER_QUEUE_N	64
 
+struct gdma_comp {
+	char *cqe_data;
+};
+
 struct mana_txq {
 	struct mana_priv *priv;
 	uint32_t num_desc;
@@ -399,6 +405,7 @@ struct mana_txq {
 
 	struct mana_gdma_queue gdma_sq;
 	struct mana_gdma_queue gdma_cq;
+	struct gdma_comp *gdma_comp_buf;
 
 	uint32_t tx_vp_offset;
 
@@ -433,6 +440,7 @@ struct mana_rxq {
 
 	struct mana_gdma_queue gdma_rq;
 	struct mana_gdma_queue gdma_cq;
+	struct gdma_comp *gdma_comp_buf;
 
 	struct mana_stats stats;
 	struct mana_mr_btree mr_btree;
@@ -477,8 +485,11 @@ uint16_t mana_rx_burst_removed(void *dpdk_rxq, struct rte_mbuf **pkts,
 uint16_t mana_tx_burst_removed(void *dpdk_rxq, struct rte_mbuf **pkts,
 			       uint16_t pkts_n);
 
-int gdma_poll_completion_queue(struct mana_gdma_queue *cq,
-			       void **comp);
+//int gdma_poll_completion_queue(struct mana_gdma_queue *cq,
+//			       void **comp);
+uint32_t gdma_poll_completion_queue(struct mana_gdma_queue *cq,
+				    struct gdma_comp *gdma_comp,
+				    uint32_t max_comp);
 
 int mana_start_rx_queues(struct rte_eth_dev *dev);
 int mana_start_tx_queues(struct rte_eth_dev *dev);
