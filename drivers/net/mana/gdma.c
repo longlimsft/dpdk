@@ -256,14 +256,13 @@ uint32_t
 gdma_poll_completion_queue(struct mana_gdma_queue *cq, struct gdma_comp *gdma_comp, uint32_t max_comp)
 {
 	struct gdma_hardware_completion_entry *cqe;
-	uint32_t head = cq->head % cq->count;
 	uint32_t new_owner_bits, old_owner_bits;
 	uint32_t cqe_owner_bits;
 	uint32_t num_comp = 0;
 	struct gdma_hardware_completion_entry *buffer = cq->buffer;
 
 	while (num_comp < max_comp) {
-		cqe = &buffer[head];
+		cqe = &buffer[cq->head % cq->count];
 		new_owner_bits = (cq->head / cq->count) &
 					COMPLETION_QUEUE_OWNER_MASK;
 		old_owner_bits = (cq->head / cq->count - 1) &
