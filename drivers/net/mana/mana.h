@@ -438,13 +438,9 @@ struct mana_rxq {
 extern int mana_logtype_driver;
 extern int mana_logtype_init;
 
-#ifdef DEBUG
 #define DRV_LOG(level, fmt, args...) \
 	rte_log(RTE_LOG_ ## level, mana_logtype_driver, "%s(): " fmt "\n", \
 		__func__, ## args)
-#else
-#define DRV_LOG(level, fmt, args...) do {} while (0)
-#endif
 
 #define PMD_INIT_LOG(level, fmt, args...) \
 	rte_log(RTE_LOG_ ## level, mana_logtype_init, "%s(): " fmt "\n",\
