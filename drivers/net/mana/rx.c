@@ -392,7 +392,9 @@ mana_rx_burst(void *dpdk_rxq, struct rte_mbuf **pkts, uint16_t pkts_n)
 	uint32_t pkt_idx = rxq->backlog_idx;
 	uint32_t pkt_len;
 	uint32_t i;
+	int retry_count = 0;
 
+retry:
 	/* Polling on new completions if we have no backlog */
 	if (rxq->comp_buf_idx == rxq->comp_buf_len) {
 		RTE_ASSERT(!pkt_idx);
@@ -504,6 +506,12 @@ drop:
 
 	rxq->backlog_idx = pkt_idx;
 	rxq->comp_buf_idx = i;
+
+	/* If all CQE are processed but there are more packets to read */
+	if (pkt_received < pkts_n && !retry_count) {
+		retry_count++;
+		goto retry;
+	}
 
 	if (wqe_posted)
 		mana_rq_ring_doorbell(rxq, wqe_posted);
