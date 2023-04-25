@@ -840,6 +840,7 @@ eal_intr_process_interrupts(struct epoll_event *events, int nfds)
 	struct rte_intr_callback *cb, *next;
 	union rte_intr_read_buffer buf;
 	struct rte_intr_callback active_cb;
+	int ret = 0;
 
 	for (n = 0; n < nfds; n++) {
 
@@ -851,7 +852,8 @@ eal_intr_process_interrupts(struct epoll_event *events, int nfds)
 			int r = read(intr_pipe.readfd, buf.charbuf,
 					sizeof(buf.charbuf));
 			RTE_SET_USED(r);
-			return -1;
+			ret = -1;
+			continue;
 		}
 		rte_spinlock_lock(&intr_lock);
 		TAILQ_FOREACH(src, &intr_sources, next)
@@ -989,7 +991,7 @@ eal_intr_process_interrupts(struct epoll_event *events, int nfds)
 		rte_spinlock_unlock(&intr_lock);
 	}
 
-	return 0;
+	return ret;
 }
 
 /**
