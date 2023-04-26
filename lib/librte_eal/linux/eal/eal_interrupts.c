@@ -488,6 +488,8 @@ rte_intr_callback_register(const struct rte_intr_handle *intr_handle,
 		return -EINVAL;
 	}
 
+	RTE_LOG(ERR, EAL, "%s: fd=%d\n", __func__, intr_handle->fd);
+
 	/* allocate a new interrupt callback entity */
 	callback = calloc(1, sizeof(*callback));
 	if (callback == NULL) {
@@ -560,6 +562,8 @@ rte_intr_callback_unregister_pending(const struct rte_intr_handle *intr_handle,
 		return -EINVAL;
 	}
 
+	RTE_LOG(ERR, EAL, "%s: fd=%d\n", __func__, intr_handle->fd);
+
 	rte_spinlock_lock(&intr_lock);
 
 	/* check if the insterrupt source for the fd is existent */
@@ -609,6 +613,8 @@ rte_intr_callback_unregister(const struct rte_intr_handle *intr_handle,
 		"Unregistering with invalid input parameter\n");
 		return -EINVAL;
 	}
+
+	RTE_LOG(ERR, EAL, "%s: fd=%d\n", __func__, intr_handle->fd);
 
 	rte_spinlock_lock(&intr_lock);
 
@@ -842,6 +848,11 @@ eal_intr_process_interrupts(struct epoll_event *events, int nfds)
 	struct rte_intr_callback active_cb;
 	int ret = 0;
 
+	RTE_LOG(ERR, EAL, "%s: nfds=%d\n", __func__, nfds);
+	for (n = 0; n < nfds; n++) {
+		RTE_LOG(ERR, EAL, "%s: fd=%d\n", __func__, events[n].data.fd);
+	}
+
 	for (n = 0; n < nfds; n++) {
 
 		/**
@@ -945,6 +956,7 @@ eal_intr_process_interrupts(struct epoll_event *events, int nfds)
 
 		if (call) {
 
+			RTE_LOG(ERR, EAL, "%s: calling callbacks for fd=%d\n", __func__, src->intr_handle.fd);
 			/* Finally, call all callbacks. */
 			TAILQ_FOREACH(cb, &src->callbacks, next) {
 
@@ -1065,6 +1077,7 @@ eal_intr_thread_main(__rte_unused void *arg)
 		 * add pipe fd into wait list, this pipe is used to
 		 * rebuild the wait list.
 		 */
+		RTE_LOG(ERR, EAL, "%s: add pipe fd=%d\n", __func__, intr_pipe.readfd);
 		if (epoll_ctl(pfd, EPOLL_CTL_ADD, intr_pipe.readfd,
 						&pipe_event) < 0) {
 			rte_panic("Error adding fd to %d epoll_ctl, %s\n",
@@ -1087,6 +1100,7 @@ eal_intr_thread_main(__rte_unused void *arg)
 			 * add all the uio device file descriptor
 			 * into wait list.
 			 */
+			RTE_LOG(ERR, EAL, "%s: add fd=%d\n", __func__, src->intr_handle.fd);
 			if (epoll_ctl(pfd, EPOLL_CTL_ADD,
 					src->intr_handle.fd, &ev) < 0){
 				rte_panic("Error adding fd %d epoll_ctl, %s\n",
