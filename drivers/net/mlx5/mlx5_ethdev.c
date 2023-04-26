@@ -1295,6 +1295,7 @@ mlx5_dev_interrupt_device_fatal(struct mlx5_ibv_shared *sh)
 		}
 		dev = &rte_eth_devices[sh->port[i].ih_port_id];
 		assert(dev);
+		DRV_LOG(ERR, "%s: id=%d dev_conf.intr_conf.rmv=%d", __func__, sh->port[i].ih_port_id, dev->data->dev_conf.intr_conf.rmv);
 		if (dev->data->dev_conf.intr_conf.rmv)
 			_rte_eth_dev_callback_process
 				(dev, RTE_ETH_EVENT_INTR_RMV, NULL);
@@ -1365,6 +1366,7 @@ mlx5_dev_interrupt_handler(void *cb_arg)
 	struct mlx5_ibv_shared *sh = cb_arg;
 	struct ibv_async_event event;
 
+	DRV_LOG(ERR, "%s: fd=%d", __func__, sh->ctx->async_fd);
 	/* Read all message from the IB device and acknowledge them. */
 	for (;;) {
 		struct rte_eth_dev *dev;
@@ -1374,6 +1376,7 @@ mlx5_dev_interrupt_handler(void *cb_arg)
 			break;
 		/* Retrieve and check IB port index. */
 		tmp = (uint32_t)event.element.port_num;
+		DRV_LOG(ERR, "%s: fd=%d event_type=%d port_num=%d", __func__, sh->ctx->async_fd, event.event_type, tmp);
 		if (!tmp && event.event_type == IBV_EVENT_DEVICE_FATAL) {
 			/*
 			 * The DEVICE_FATAL event is called once for
