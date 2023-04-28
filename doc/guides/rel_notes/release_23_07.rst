@@ -55,6 +55,13 @@ New Features
      Also, make sure to start the actual text at the margin.
      =======================================================
 
+* **Added vmxnet3 version 7 support.**
+
+  Added support for vmxnet3 version 7 which includes support
+  for uniform passthrough(UPT). The patches also add support
+  for new capability registers, large passthrough BAR and some
+  performance enhancements for UPT.
+
 
 Removed Items
 -------------
