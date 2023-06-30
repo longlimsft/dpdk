@@ -226,6 +226,8 @@ mana_tx_burst(void *dpdk_txq, struct rte_mbuf **tx_pkts, uint16_t nb_pkts)
 		struct transmit_oob_v2 tx_oob;
 		struct one_sgl sgl;
 		uint16_t seg_idx;
+		struct gdma_work_request work_req;
+		uint32_t wqe_size_in_bu;
 
 		if (txq->desc_ring_len >= txq->num_desc)
 			break;
@@ -246,6 +248,16 @@ mana_tx_burst(void *dpdk_txq, struct rte_mbuf **tx_pkts, uint16_t nb_pkts)
 
 		tx_oob.short_oob.tx_compute_IP_header_checksum =
 			m_pkt->ol_flags & RTE_MBUF_F_TX_IP_CKSUM ? 1 : 0;
+
+		/* RTE_MBUF_F_TX_TCP_SEG implies RTE_MBUF_F_TX_TCP_CKSUM */
+		if (m_pkt->ol_flags & RTE_MBUF_F_TX_TCP_SEG) {
+			m_pkt->ol_flags &= ~RTE_MBUF_F_TX_L4_MASK;
+			m_pkt->ol_flags |= RTE_MBUF_F_TX_TCP_CKSUM;
+			work_req.flags = GDMA_WR_FLAG_OOB_IN_SGL |
+					 GDMA_WR_FLAG_PAD_BY_SGE0;
+			work_req.client_data_unit = m_pkt->tso_segsz;
+		} else
+			work_req.client_data_unit = NOT_USING_CLIENT_DATA_UNIT;
 
 		if ((m_pkt->ol_flags & RTE_MBUF_F_TX_L4_MASK) ==
 				RTE_MBUF_F_TX_TCP_CKSUM) {
@@ -386,9 +398,6 @@ mana_tx_burst(void *dpdk_txq, struct rte_mbuf **tx_pkts, uint16_t nb_pkts)
 		else
 			tx_oob.short_oob.suppress_tx_CQE_generation = 0;
 
-		struct gdma_work_request work_req;
-		uint32_t wqe_size_in_bu;
-
 		work_req.gdma_header.struct_size = sizeof(work_req);
 
 		work_req.sgl = sgl.gdma_sgl;
@@ -397,7 +406,6 @@ mana_tx_burst(void *dpdk_txq, struct rte_mbuf **tx_pkts, uint16_t nb_pkts)
 			sizeof(struct transmit_short_oob_v2);
 		work_req.inline_oob_data = &tx_oob;
 		work_req.flags = 0;
-		work_req.client_data_unit = NOT_USING_CLIENT_DATA_UNIT;
 
 		ret = gdma_post_work_request(&txq->gdma_sq, &work_req,
 					     &wqe_size_in_bu);
