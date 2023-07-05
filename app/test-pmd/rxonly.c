@@ -64,6 +64,7 @@ stream_init_receive(struct fwd_stream *fs)
 {
 	fs->disabled = ports[fs->rx_port].rxq[fs->rx_queue].state ==
 						RTE_ETH_QUEUE_STATE_STOPPED;
+	fs->disabled = 0;
 }
 
 struct fwd_engine rx_only_engine = {
