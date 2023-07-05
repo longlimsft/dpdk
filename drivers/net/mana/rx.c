@@ -421,8 +421,11 @@ repoll:
 
 		case CQE_RX_TRUNCATED:
 			DP_LOG(DEBUG, "Drop a truncated packet");
+
 			rxq->stats.errors++;
 			rte_pktmbuf_free(mbuf);
+
+			i++;
 			goto drop;
 
 		case CQE_RX_COALESCED_4:
@@ -430,9 +433,15 @@ repoll:
 			break;
 
 		default:
-			DP_LOG(ERR, "Unknown RX CQE type %d",
-			       oob->cqe_hdr.cqe_type);
-			continue;
+			DP_LOG(ERR, "Unknown RX CQE type %d client %d vendor %d",
+			       oob->cqe_hdr.cqe_type, oob->cqe_hdr.client_type,
+			       oob->cqe_hdr.vendor_err);
+
+			rxq->stats.errors++;
+			rte_pktmbuf_free(mbuf);
+
+			i++;
+			goto drop;
 		}
 
 		DP_LOG(DEBUG, "mana_rx_comp_oob type %d rxq %p",
