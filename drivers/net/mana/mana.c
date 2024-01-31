@@ -1320,8 +1320,8 @@ mana_probe_port(struct ibv_device *ibdev, struct ibv_device_attr_ex *dev_attr,
 		/* fd is no not used after mapping doorbell */
 		close(fd);
 
-		eth_dev->tx_pkt_burst = mana_tx_burst_removed;
-		eth_dev->rx_pkt_burst = mana_rx_burst_removed;
+		eth_dev->tx_pkt_burst = mana_tx_burst;
+		eth_dev->rx_pkt_burst = mana_rx_burst;
 
 		rte_eth_copy_pci_info(eth_dev, pci_dev);
 		rte_eth_dev_probing_finish(eth_dev);
