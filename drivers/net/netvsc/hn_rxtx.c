@@ -1305,7 +1305,7 @@ hn_rndis_pktinfo_append(struct rndis_packet_msg *pkt,
 /* Put RNDIS header and packet info on packet */
 static void hn_encap(struct rndis_packet_msg *pkt,
 		     uint16_t queue_id,
-		     const struct rte_mbuf *m)
+		     struct rte_mbuf *m)
 {
 	unsigned int hlen = m->l2_len + m->l3_len;
 	uint32_t *pi_data;
@@ -1331,7 +1331,8 @@ static void hn_encap(struct rndis_packet_msg *pkt,
 					  NDIS_PKTINFO_TYPE_HASHVAL);
 	*pi_data = queue_id;
 
-	if (m->ol_flags & RTE_MBUF_F_TX_VLAN) {
+	/* Always strip/extract vlan info for a 801.2Q packet */
+	if (!rte_vlan_strip(m) || m->ol_flags & RTE_MBUF_F_TX_VLAN) {
 		pi_data = hn_rndis_pktinfo_append(pkt, NDIS_VLAN_INFO_SIZE,
 						  NDIS_PKTINFO_TYPE_VLAN);
 		*pi_data = NDIS_VLAN_INFO_MAKE(RTE_VLAN_TCI_ID(m->vlan_tci),
