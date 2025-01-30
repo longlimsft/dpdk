@@ -274,8 +274,9 @@ smp_port_init(uint16_t port, struct rte_mempool *mbuf_pool,
 	}
 
 	retval = rte_eth_promiscuous_enable(port);
-	if (retval != 0)
-		return retval;
+	printf("%s: rte_eth_promiscuous_enable(port); %d\n", __func__, retval);
+//	if (retval != 0)
+//		return retval;
 
 	retval  = rte_eth_dev_start(port);
 	if (retval < 0)
