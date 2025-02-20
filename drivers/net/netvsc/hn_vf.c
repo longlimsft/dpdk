@@ -224,6 +224,9 @@ int hn_vf_add(struct rte_eth_dev *dev, struct hn_data *hv)
 {
 	int ret, port;
 
+	// HACK DONT CARE ABOUT VF
+	return 0;
+
 	if (!hv->vf_ctx.vf_vsp_reported || hv->vf_ctx.vf_vsc_switched)
 		return 0;
 
