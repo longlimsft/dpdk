@@ -453,7 +453,7 @@ int vmbus_uio_get_subchan(struct vmbus_channel *primary,
 		if (err) {
 			VMBUS_LOG(NOTICE, "no monitor_id in %s:%s",
 				  subchan_path, strerror(-err));
-			goto fail;
+			monid = UINT8_MAX;
 		}
 
 		err = vmbus_chan_create(dev, relid, subid, monid, subchan);

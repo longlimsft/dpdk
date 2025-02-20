@@ -25,6 +25,25 @@ vmbus_sync_set_bit(volatile RTE_ATOMIC(uint32_t) *addr, uint32_t mask)
 }
 
 static inline void
+vmbus_send_interrupt(const struct rte_vmbus_device *dev, uint32_t relid)
+{
+	uint32_t *int_addr;
+	uint32_t int_mask;
+	int uio_fd, ret;
+	uint32_t irq = 1;
+
+	int_addr = dev->int_page + relid / 32;
+	int_mask = 1u << (relid % 32);
+
+	vmbus_sync_set_bit(int_addr, int_mask);
+
+	uio_fd = rte_intr_fd_get(dev->intr_handle);
+	ret = write(uio_fd, &irq, sizeof(irq));
+	if (ret < 0)
+		VMBUS_LOG(ERR, "failed to send interrupt %d", errno);
+}
+
+static inline void
 vmbus_set_monitor(const struct vmbus_channel *channel, uint32_t monitor_id)
 {
 	RTE_ATOMIC(uint32_t) *monitor_addr;
@@ -41,7 +60,10 @@ vmbus_set_monitor(const struct vmbus_channel *channel, uint32_t monitor_id)
 static void
 vmbus_set_event(const struct vmbus_channel *chan)
 {
-	vmbus_set_monitor(chan, chan->monitor_id);
+	if (chan->monitor_id != UINT8_MAX)
+		vmbus_set_monitor(chan, chan->monitor_id);
+	else
+		vmbus_send_interrupt(chan->device, chan->relid);
 }
 
 /*
@@ -52,6 +74,9 @@ rte_vmbus_set_latency(const struct rte_vmbus_device *dev,
 		      const struct vmbus_channel *chan,
 		      uint32_t latency)
 {
+	if (chan->monitor_id == UINT8_MAX)
+		return;
+
 	uint32_t trig_idx = chan->monitor_id / VMBUS_MONTRIG_LEN;
 	uint32_t trig_offs = chan->monitor_id % VMBUS_MONTRIG_LEN;
 
