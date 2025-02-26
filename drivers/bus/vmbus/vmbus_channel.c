@@ -33,7 +33,24 @@ vmbus_send_interrupt(const struct rte_vmbus_device *dev, uint32_t relid)
 	int_addr = dev->int_page + relid / 32;
 	int_mask = 1u << (relid % 32);
 	vmbus_sync_set_bit(int_addr, int_mask);
+/*
+	if (rte_eal_process_type() == RTE_PROC_SECONDARY) {
+		struct rte_device *dev = dev->device;
+		for (unsigned port =0; port <RTE_MAX_ETHPORTS; port++)
+			if (rte_eth_devices[port].device == dev)
+				break;
+		RTE_VERIFY(port != RTE_MAX_ETHPORTS);
 
+		struct rte_eth_dev *dev =
+			&rte_eth_devices[port];
+
+		struct hn_nvs_process_priv *process_priv = dev->process_private;
+		const struct rte_vmbus_device *secondary_dev =
+			process_private->vmbus_dev;
+
+		return vmbus_uio_irq_control(secondary_dev, 1);
+	}
+*/
 	vmbus_uio_irq_control(dev, 1);
 }
 
@@ -52,12 +69,12 @@ vmbus_set_monitor(const struct vmbus_channel *channel, uint32_t monitor_id)
 }
 
 static void
-vmbus_set_event(const struct vmbus_channel *chan)
+vmbus_set_event(struct rte_vmbus_device *dev, const struct vmbus_channel *chan)
 {
 	if (chan->monitor_id != UINT8_MAX)
 		vmbus_set_monitor(chan, chan->monitor_id);
 	else
-		vmbus_send_interrupt(chan->device, chan->relid);
+		vmbus_send_interrupt(dev, chan->relid);
 }
 
 /*
@@ -96,7 +113,7 @@ rte_vmbus_set_latency(const struct rte_vmbus_device *dev,
  * Can't do a hypercall from userspace.
  */
 void
-rte_vmbus_chan_signal_tx(const struct vmbus_channel *chan)
+rte_vmbus_chan_signal_tx(struct rte_vmbus_device *dev, const struct vmbus_channel *chan)
 {
 	const struct vmbus_br *tbr = &chan->txbr;
 
@@ -107,14 +124,15 @@ rte_vmbus_chan_signal_tx(const struct vmbus_channel *chan)
 	if (tbr->vbr->imask)
 		return;
 
-	vmbus_set_event(chan);
+	vmbus_set_event(dev, chan);
 }
 
 
 /* Do a simple send directly using transmit ring. */
-int rte_vmbus_chan_send(struct vmbus_channel *chan, uint16_t type,
-			void *data, uint32_t dlen,
-			uint64_t xactid, uint32_t flags, bool *need_sig)
+int rte_vmbus_chan_send(struct rte_vmbus_device *dev,
+			struct vmbus_channel *chan, uint16_t type, void *data,
+			uint32_t dlen, uint64_t xactid, uint32_t flags,
+			bool *need_sig)
 {
 	struct vmbus_chanpkt pkt;
 	unsigned int pktlen, pad_pktlen;
@@ -150,12 +168,13 @@ int rte_vmbus_chan_send(struct vmbus_channel *chan, uint16_t type,
 	if (need_sig)
 		*need_sig |= send_evt;
 	else if (error == 0 && send_evt)
-		rte_vmbus_chan_signal_tx(chan);
+		rte_vmbus_chan_signal_tx(dev, chan);
 	return error;
 }
 
 /* Do a scatter/gather send where the descriptor points to data. */
-int rte_vmbus_chan_send_sglist(struct vmbus_channel *chan,
+int rte_vmbus_chan_send_sglist(struct rte_vmbus_device *dev,
+			       struct vmbus_channel *chan,
 			       struct vmbus_gpa sg[], uint32_t sglen,
 			       void *data, uint32_t dlen,
 			       uint64_t xactid, bool *need_sig)
@@ -194,7 +213,7 @@ int rte_vmbus_chan_send_sglist(struct vmbus_channel *chan,
 	if (need_sig)
 		*need_sig |= send_evt;
 	else if (error == 0 && send_evt)
-		rte_vmbus_chan_signal_tx(chan);
+		rte_vmbus_chan_signal_tx(dev, chan);
 	return error;
 }
 
@@ -207,7 +226,7 @@ bool rte_vmbus_chan_rx_empty(const struct vmbus_channel *channel)
 }
 
 /* Signal host after reading N bytes */
-void rte_vmbus_chan_signal_read(struct vmbus_channel *chan, uint32_t bytes_read)
+void rte_vmbus_chan_signal_read(struct rte_vmbus_device *dev, struct vmbus_channel *chan, uint32_t bytes_read)
 {
 	struct vmbus_br *rbr = &chan->rxbr;
 	uint32_t write_sz, pending_sz;
@@ -234,10 +253,11 @@ void rte_vmbus_chan_signal_read(struct vmbus_channel *chan, uint32_t bytes_read)
 	if (write_sz <= pending_sz)
 		return;
 
-	vmbus_set_event(chan);
+	vmbus_set_event(dev, chan);
 }
 
-int rte_vmbus_chan_recv(struct vmbus_channel *chan, void *data, uint32_t *len,
+int rte_vmbus_chan_recv(struct rte_vmbus_device *dev,
+			struct vmbus_channel *chan, void *data, uint32_t *len,
 			uint64_t *request_id)
 {
 	struct vmbus_chanpkt_hdr pkt;
@@ -279,7 +299,7 @@ int rte_vmbus_chan_recv(struct vmbus_channel *chan, void *data, uint32_t *len,
 	if (error)
 		return error;
 
-	rte_vmbus_chan_signal_read(chan, dlen + hlen + sizeof(uint64_t));
+	rte_vmbus_chan_signal_read(dev, chan, dlen + hlen + sizeof(uint64_t));
 	return 0;
 }
 
@@ -338,6 +358,7 @@ int vmbus_chan_create(const struct rte_vmbus_device *device,
 
 	STAILQ_INIT(&chan->subchannel_list);
 	chan->device = device;
+	printf("%s: create channel %p device %p\n", __func__, chan, device);
 	chan->subchannel_id = subid;
 	chan->relid = relid;
 	chan->monitor_id = monitor_id;
