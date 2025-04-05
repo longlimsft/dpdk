@@ -101,7 +101,8 @@ struct __rte_packed_begin vmbus_bufring {
 	} feature_bits;
 
 	/* Pad it to rte_mem_page_size() so that data starts on page boundary */
-	uint8_t	reserved2[4028];
+//	uint8_t	reserved2[4028];
+	uint8_t reserved2[65468];
 
 	/*
 	 * Ring data starts here + RingDataStartOffset

@@ -169,6 +169,7 @@ vmbus_uio_map_resource_by_index(struct rte_vmbus_device *dev, int idx,
 	/* offset is special in uio it indicates which resource */
 	offset = idx * rte_mem_page_size();
 
+	printf("%s: index %d\n", __func__, idx);
 	mapaddr = vmbus_map_resource(vmbus_map_addr, fd, offset, size, flags);
 	close(fd);
 
@@ -325,6 +326,8 @@ int vmbus_uio_map_rings(struct vmbus_channel *chan)
 
 	if (ret)
 		return ret;
+
+	printf("%s: ring_buf %p ring_size %d\n", __func__, ring_buf, ring_size);
 
 	vmbus_br_setup(&chan->txbr, ring_buf, ring_size);
 	vmbus_br_setup(&chan->rxbr, (char *)ring_buf + ring_size, ring_size);
