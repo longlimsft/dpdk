@@ -658,6 +658,8 @@ static void hn_rxpkt(struct hn_rx_queue *rxq, struct hn_rx_bufinfo *rxb,
 		if (use_extbuf)
 			rte_pktmbuf_detach_extbuf(m);
 		rte_pktmbuf_free(m);
+
+//		printf("%s: rx ring full %d\n", __func__, rte_ring_count(rxq->rx_ring));
 	}
 }
 
@@ -1130,6 +1132,9 @@ retry:
 		}
 
 		if (tx_limit && tx_done >= tx_limit)
+			break;
+
+		if (rxq->rx_ring && rte_ring_free_count(rxq->rx_ring) < 16)
 			break;
 	}
 
@@ -1621,6 +1626,10 @@ hn_recv_pkts(void *prxq, struct rte_mbuf **rx_pkts, uint16_t nb_pkts)
 	/* Always check the vmbus path for multicast and new flows */
 	nb_rcv = rte_ring_sc_dequeue_burst(rxq->rx_ring,
 					   (void **)rx_pkts, nb_pkts, NULL);
+
+//	if (nb_rcv > 10) {
+//		printf("%s: nb_rcv %d ring count %d\n", __func__, nb_rcv, rte_ring_count(rxq->rx_ring));
+//	}
 
 	/* If VF is available, check that as well */
 	if (hv->vf_ctx.vf_vsc_switched) {
