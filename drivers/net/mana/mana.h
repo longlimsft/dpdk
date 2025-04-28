@@ -16,6 +16,10 @@ struct mana_shared_data {
 	unsigned int secondary_cnt;
 };
 
+/* vendor_part_id returned from ibv_query_device */
+#define GDMA_DEVICE_MANA	2
+#define GDMA_DEVICE_MANA_IB	3
+
 #define MANA_MAX_MTU	9000
 #define MIN_RX_BUF_SIZE	1024
 #define MANA_MAX_MAC_ADDR 1
