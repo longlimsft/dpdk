@@ -218,7 +218,7 @@ mana_mr_btree_expand(struct mana_mr_btree *bt, int n)
 		return -1;
 	}
 
-	DP_LOG(ERR, "Expanded btree to size %d", n);
+	DP_LOG(DEBUG, "Expanded btree to size %d", n);
 	bt->table = mem;
 	bt->size = n;
 
@@ -295,7 +295,7 @@ mana_mr_btree_init(struct mana_mr_btree *bt, int n, int socket)
 	};
 	bt->len = 1;
 
-	DRV_LOG(ERR, "B-tree initialized table %p size %d len %d",
+	DRV_LOG(INFO, "B-tree initialized table %p size %d len %d",
 		bt->table, n, bt->len);
 
 	return 0;
