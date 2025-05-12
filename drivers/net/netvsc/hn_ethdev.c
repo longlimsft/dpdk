@@ -639,6 +639,7 @@ static void netvsc_hotplug_retry(void *args)
 					    d->name);
 			}
 
+			hn_vf_add(dev, hv);
 			break;
 		}
 	}
@@ -1379,11 +1380,12 @@ eth_hn_dev_init(struct rte_eth_dev *eth_dev)
 	hv->max_queues = RTE_MIN(rxr_cnt, (unsigned int)max_chan);
 
 	/* If VF was reported but not added, do it now */
+	rte_rwlock_write_lock(&hv->vf_lock);
 	if (hv->vf_ctx.vf_vsp_reported && !hv->vf_ctx.vf_vsc_switched) {
 		PMD_INIT_LOG(DEBUG, "Adding VF device");
-
-		err = hn_vf_add(eth_dev, hv);
+		err = __hn_vf_add(eth_dev, hv);
 	}
+	rte_rwlock_write_unlock(&hv->vf_lock);
 
 	return 0;
 
