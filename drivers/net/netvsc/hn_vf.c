@@ -59,8 +59,8 @@ static int hn_vf_attach(struct rte_eth_dev *dev, struct hn_data *hv)
 	int port, ret;
 
 	if (hv->vf_ctx.vf_attached) {
-		PMD_DRV_LOG(ERR, "VF already attached");
-		return 0;
+		PMD_DRV_LOG(NOTICE, "VF already attached");
+		return -EEXIST;
 	}
 
 	port = hn_vf_match(dev);
@@ -91,6 +91,18 @@ static int hn_vf_attach(struct rte_eth_dev *dev, struct hn_data *hv)
 	PMD_DRV_LOG(DEBUG, "Attach VF device %u", port);
 	hv->vf_ctx.vf_attached = true;
 	hv->vf_ctx.vf_port = port;
+
+	ret = rte_eth_dev_callback_register(hv->vf_ctx.vf_port,
+					    RTE_ETH_EVENT_INTR_RMV,
+					    hn_eth_rmv_event_callback,
+					    hv);
+	if (ret) {
+		PMD_DRV_LOG(ERR,
+			    "Registering callback failed for vf port %d ret %d",
+			    hv->vf_ctx.vf_port, ret);
+		return ret;
+	}
+
 	return 0;
 }
 
@@ -217,36 +229,22 @@ static int hn_setup_vf_queues(int port, struct rte_eth_dev *dev)
 	return ret;
 }
 
-int hn_vf_add(struct rte_eth_dev *dev, struct hn_data *hv);
-
-static void hn_vf_add_retry(void *args)
-{
-	struct rte_eth_dev *dev = args;
-	struct hn_data *hv = dev->data->dev_private;
-
-	hn_vf_add(dev, hv);
-}
-
 int hn_vf_configure(struct rte_eth_dev *dev,
 		    const struct rte_eth_conf *dev_conf);
 
 /* Add new VF device to synthetic device */
 int hn_vf_add(struct rte_eth_dev *dev, struct hn_data *hv)
 {
-	int ret, port;
-
-	if (!hv->vf_ctx.vf_vsp_reported || hv->vf_ctx.vf_vsc_switched)
-		return 0;
+	int ret = 0, port;
 
 	rte_rwlock_write_lock(&hv->vf_lock);
 
-	ret = hn_vf_attach(dev, hv);
-	if (ret) {
-		PMD_DRV_LOG(NOTICE,
-			    "RNDIS reports VF but device not found, retrying");
-		rte_eal_alarm_set(1000000, hn_vf_add_retry, dev);
+	if (!hv->vf_ctx.vf_vsp_reported || hv->vf_ctx.vf_vsc_switched)
 		goto exit;
-	}
+
+	ret = hn_vf_attach(dev, hv);
+	if (ret)
+		goto exit;
 
 	port = hv->vf_ctx.vf_port;
 
@@ -430,29 +428,12 @@ int hn_vf_configure(struct rte_eth_dev *dev,
 	vf_conf.intr_conf.rmv = 1;
 
 	if (hv->vf_ctx.vf_attached) {
-		ret = rte_eth_dev_callback_register(hv->vf_ctx.vf_port,
-						    RTE_ETH_EVENT_INTR_RMV,
-						    hn_eth_rmv_event_callback,
-						    hv);
-		if (ret) {
-			PMD_DRV_LOG(ERR,
-				    "Registering callback failed for vf port %d ret %d",
-				    hv->vf_ctx.vf_port, ret);
-			return ret;
-		}
-
 		ret = rte_eth_dev_configure(hv->vf_ctx.vf_port,
 					    dev->data->nb_rx_queues,
 					    dev->data->nb_tx_queues,
 					    &vf_conf);
 		if (ret) {
 			PMD_DRV_LOG(ERR, "VF configuration failed: %d", ret);
-
-			rte_eth_dev_callback_unregister(hv->vf_ctx.vf_port,
-							RTE_ETH_EVENT_INTR_RMV,
-							hn_eth_rmv_event_callback,
-							hv);
-
 			return ret;
 		}
 
@@ -558,8 +539,6 @@ int hn_vf_close(struct rte_eth_dev *dev)
 {
 	int ret = 0;
 	struct hn_data *hv = dev->data->dev_private;
-
-	rte_eal_alarm_cancel(hn_vf_add_retry, dev);
 
 	rte_rwlock_read_lock(&hv->vf_lock);
 	if (hv->vf_ctx.vf_attached) {
