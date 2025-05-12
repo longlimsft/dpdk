@@ -639,6 +639,7 @@ static void netvsc_hotplug_retry(void *args)
 					    d->name);
 			}
 
+			hn_vf_add(dev, hv);
 			break;
 		}
 	}
