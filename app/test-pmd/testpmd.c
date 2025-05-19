@@ -593,6 +593,7 @@ eth_rx_metadata_negotiate_mp(uint16_t port_id)
 				    port_id);
 		}
 	} else if (ret != -ENOTSUP) {
+		return;
 		rte_exit(EXIT_FAILURE, "Error when negotiating Rx meta features on port %u: %s\n",
 			 port_id, rte_strerror(-ret));
 	}
@@ -1779,10 +1780,18 @@ init_config(void)
 #endif
 }
 
+#include <ethdev_driver.h>
+#include <ethdev_pci.h>
 
 void
 reconfig(portid_t new_port_id, unsigned socket_id)
 {
+	struct rte_eth_dev *edev = &rte_eth_devices[new_port_id];
+	struct rte_device *dev = edev->device;
+	printf("%s: dev->driver->name %s\n", __func__, dev->driver->name);
+	if (strcmp(dev->driver->name, "net_netvsc"))
+		return;
+
 	/* Reconfiguration of Ethernet ports. */
 	init_config_port_offloads(new_port_id, socket_id);
 	init_port_config();
@@ -2893,6 +2902,13 @@ start_port(portid_t pid)
 		return 0;
 
 	RTE_ETH_FOREACH_DEV(pi) {
+
+		struct rte_eth_dev *edev = &rte_eth_devices[pi];
+		struct rte_device *dev = edev->device;
+		printf("%s: dev->driver->name %s\n", __func__, dev->driver->name);
+		if (strcmp(dev->driver->name, "net_netvsc"))
+			continue;
+
 		if (pid != pi && pid != (portid_t)RTE_PORT_ALL)
 			continue;
 
