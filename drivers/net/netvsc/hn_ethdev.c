@@ -41,6 +41,31 @@
 #include "hn_nvs.h"
 #include "ndis.h"
 
+/* Spinlock for netvsc_shared_data */
+static rte_spinlock_t netvsc_shared_data_lock = RTE_SPINLOCK_INITIALIZER;
+
+static struct netvsc_shared_data {
+	RTE_ATOMIC(uint32_t) secondary_cnt;
+} *netvsc_shared_data;
+
+static const struct rte_memzone *netvsc_shared_mz;
+static const char *MZ_NETVSC_SHARED_DATA = "netvsc_shared_data";
+
+static struct netvsc_local_data {
+	bool init_done;
+	unsigned int primary_cnt;
+	unsigned int secondary_cnt;
+} netvsc_local_data;
+
+#define NETVSC_MP_NAME "net_netvsc_mp"
+#define NETVSC_MP_REQ_TIMEOUT_SEC 5
+
+struct netvsc_mp_param {
+	enum netvsc_mp_req_type type;
+	int port_id;
+	int result;
+};
+
 #define HN_TX_OFFLOAD_CAPS (RTE_ETH_TX_OFFLOAD_IPV4_CKSUM | \
 			    RTE_ETH_TX_OFFLOAD_TCP_CKSUM  | \
 			    RTE_ETH_TX_OFFLOAD_UDP_CKSUM  | \
@@ -1496,6 +1521,213 @@ out:
 	rte_spinlock_unlock(&netvsc_lock);
 }
 
+static int netvsc_mp_primary_handle(const struct rte_mp_msg *mp_msg __rte_unused, const void *peer __rte_unused)
+{
+	return 0;
+}
+
+static void
+mp_init_msg(struct rte_mp_msg *msg, enum netvsc_mp_req_type type, int port_id)
+{
+	struct netvsc_mp_param *param;
+
+	strlcpy(msg->name, NETVSC_MP_NAME, sizeof(msg->name));
+	msg->len_param = sizeof(*param);
+
+	param = (struct netvsc_mp_param *)msg->param;
+	param->type = type;
+	param->port_id = port_id;
+}
+
+static int netvsc_secondary_handle_device_remove(struct hn_data *hv)
+{
+//	int ret;
+	uint16_t port_id = hv->vf_ctx.vf_port;
+	struct rte_eth_dev *dev;
+
+	PMD_DRV_LOG(DEBUG, "Secondary handle eth device remove port id %d VF port id %d", hv->port_id, port_id);
+
+	/* VF is already locked by primary */
+/*
+	ret = rte_eth_dev_stop(port_id);
+	if (ret) {
+		PMD_DRV_LOG(ERR, "Secondary failed to stop device %d", ret);
+		return ret;
+	}
+
+	ret = rte_eth_dev_close(port_id);
+	if (ret)
+		PMD_DRV_LOG(ERR, "Secondary failed to close device %d", ret);
+		*/
+	dev = &rte_eth_devices[port_id];
+	return rte_eth_dev_release_port(dev);
+
+//	return ret;
+}
+
+static int netvsc_mp_secondary_handle(const struct rte_mp_msg *mp_msg, const void *peer)
+{
+	struct rte_mp_msg mp_res = { 0 };
+	struct netvsc_mp_param *res = (struct netvsc_mp_param *) mp_res.param;
+	const struct netvsc_mp_param *param =
+		(const struct netvsc_mp_param *) mp_msg->param;
+	struct rte_eth_dev *dev;
+	struct hn_data *hv;
+	int ret = 0;
+
+	if (!rte_eth_dev_is_valid_port(param->port_id)) {
+		PMD_DRV_LOG(ERR, "MP handle port ID %u invalid", param->port_id);
+		return -ENODEV;
+	}
+
+	dev = &rte_eth_devices[param->port_id];
+	hv = dev->data->dev_private;
+
+	mp_init_msg(&mp_res, param->type, param->port_id);
+
+	switch (param->type) {
+	case NETVSC_MP_REQ_VF_REMOVE:
+		/* remove the VF from DPDK and netvsc */
+		res->result = netvsc_secondary_handle_device_remove(hv);
+		ret = rte_mp_reply(&mp_res, peer);
+		break;
+
+	default:
+		PMD_DRV_LOG(ERR, "Port %u unknown primary MP type %u",
+			param->port_id, param->type);
+		ret = -EINVAL;
+	}
+
+	return ret;
+}
+
+static int netvsc_mp_init_primary(void)
+{
+	int ret;
+	ret = rte_mp_action_register(NETVSC_MP_NAME, netvsc_mp_primary_handle);
+	if (ret && rte_errno != ENOTSUP) {
+		PMD_DRV_LOG(ERR, "Failed to register primary handler %d %d",
+			ret, rte_errno);
+		return -1;
+	}
+
+	return 0;
+}
+
+static void netvsc_mp_uninit_primary(void)
+{
+	rte_mp_action_unregister(NETVSC_MP_NAME);
+}
+
+static int netvsc_mp_init_secondary(void)
+{
+	return rte_mp_action_register(NETVSC_MP_NAME, netvsc_mp_secondary_handle);
+}
+
+static void netvsc_mp_uninit_secondary(void)
+{
+	rte_mp_action_unregister(NETVSC_MP_NAME);
+}
+
+int netvsc_mp_req_VF(struct hn_data *hv, enum netvsc_mp_req_type type)
+{
+	struct rte_mp_msg mp_req = { 0 };
+	struct rte_mp_msg *mp_res;
+	struct rte_mp_reply mp_rep;
+	struct netvsc_mp_param *res;
+	struct timespec ts = {.tv_sec = NETVSC_MP_REQ_TIMEOUT_SEC, .tv_nsec = 0};
+	int i, ret;
+
+	// if secondary count is 0, return
+	if (rte_atomic_load_explicit(&netvsc_shared_data->secondary_cnt, rte_memory_order_relaxed) == 0)
+		return 0;
+
+	mp_init_msg(&mp_req, type, hv->port_id);
+
+	ret = rte_mp_request_sync(&mp_req, &mp_rep, &ts);
+	if (ret) {
+		if (rte_errno != ENOTSUP)
+			PMD_DRV_LOG(ERR, "port %u failed to request VF remove",
+				    hv->port_id);
+		else
+			ret = 0;
+		goto exit;
+	}
+
+	if (mp_rep.nb_sent != mp_rep.nb_received) {
+		PMD_DRV_LOG(ERR, "port %u not all secondaries responded type %d",
+			    hv->port_id, type);
+		ret = -1;
+		goto exit;
+	}
+	for (i = 0; i < mp_rep.nb_received; i++) {
+		mp_res = &mp_rep.msgs[i];
+		res = (struct netvsc_mp_param *)mp_res->param;
+		if (res->result) {
+			PMD_DRV_LOG(ERR, "port %u request failed on secondary %d",
+				    hv->port_id, i);
+			ret = -1;
+			goto exit;
+		}
+	}
+
+exit:
+	free(mp_rep.msgs);
+	return ret;
+}
+
+static int netvsc_init_once(void)
+{
+	int ret;
+	const struct rte_memzone *secondary_mz;
+
+	if (netvsc_local_data.init_done)
+		return 0;
+
+	switch (rte_eal_process_type()) {
+	case RTE_PROC_PRIMARY:
+		netvsc_shared_mz = rte_memzone_reserve(MZ_NETVSC_SHARED_DATA, sizeof(*netvsc_shared_data), SOCKET_ID_ANY, 0);
+		if (!netvsc_shared_mz) {
+			PMD_DRV_LOG(ERR, "Cannot allocate netvsc shared data");
+			return -rte_errno;
+		}
+		netvsc_shared_data = netvsc_shared_mz->addr;
+		rte_atomic_store_explicit(&netvsc_shared_data->secondary_cnt, 0, rte_memory_order_relaxed);
+
+		ret = netvsc_mp_init_primary();
+		if (ret) {
+			rte_memzone_free(netvsc_shared_mz);
+			break;
+		}
+
+		PMD_DRV_LOG(INFO, "MP INIT PRIMARY");
+		netvsc_local_data.init_done = true;
+		break;
+
+	case RTE_PROC_SECONDARY:
+		secondary_mz = rte_memzone_lookup(MZ_NETVSC_SHARED_DATA);
+		if (!secondary_mz) {
+			PMD_DRV_LOG(ERR, "Cannot attach netvsc shared data");
+			return -rte_errno;
+		}
+		netvsc_shared_data = secondary_mz->addr;
+		ret = netvsc_mp_init_secondary();
+		if (ret)
+			break;
+
+		PMD_DRV_LOG(INFO, "MP INIT SECONDARY");
+		netvsc_local_data.init_done = true;
+		break;
+
+	default:
+		/* Impossible */
+		ret = -EPROTO;
+		break;
+	}
+
+	return ret;
+}
+
 static int eth_hn_probe(struct rte_vmbus_driver *drv __rte_unused,
 			struct rte_vmbus_device *dev)
 {
@@ -1508,6 +1740,12 @@ static int eth_hn_probe(struct rte_vmbus_driver *drv __rte_unused,
 	ret = populate_cache_list();
 	if (ret)
 		return ret;
+
+	ret = netvsc_init_once();
+	if (ret) {
+		PMD_DRV_LOG(ERR, "Failed to init driver");
+		goto fail;
+	}
 
 	ret = rte_dev_event_monitor_start();
 	if (ret) {
@@ -1538,6 +1776,16 @@ static int eth_hn_probe(struct rte_vmbus_driver *drv __rte_unused,
 		goto dev_init_failed;
 
 	rte_eth_dev_probing_finish(eth_dev);
+
+	rte_spinlock_lock(&netvsc_shared_data_lock);
+	if (rte_eal_process_type() == RTE_PROC_PRIMARY) {
+		netvsc_local_data.primary_cnt++;
+	} else {
+		rte_atomic_fetch_add_explicit(&netvsc_shared_data->secondary_cnt, 1, rte_memory_order_relaxed);
+		netvsc_local_data.secondary_cnt++;
+	}
+	rte_spinlock_unlock(&netvsc_shared_data_lock);
+
 	return ret;
 
 dev_init_failed:
@@ -1561,6 +1809,28 @@ static int eth_hn_remove(struct rte_vmbus_device *dev)
 	int ret;
 
 	PMD_INIT_FUNC_TRACE();
+
+	rte_spinlock_lock(&netvsc_shared_data_lock);
+	if (rte_eal_process_type() == RTE_PROC_PRIMARY) {
+		netvsc_local_data.primary_cnt--;
+		if (!netvsc_local_data.primary_cnt) {
+			PMD_DRV_LOG(DEBUG, "mp uninit primary");
+			netvsc_mp_uninit_primary();
+
+			PMD_DRV_LOG(DEBUG, "free shared memzone data");
+			rte_memzone_free(netvsc_shared_mz);
+			netvsc_shared_mz = NULL;
+			netvsc_shared_data = NULL;
+		}
+	} else {
+		rte_atomic_fetch_sub_explicit(&netvsc_shared_data->secondary_cnt, 1, rte_memory_order_relaxed);
+		netvsc_local_data.secondary_cnt--;
+		if (!netvsc_local_data.secondary_cnt) {
+			PMD_DRV_LOG(DEBUG, "mp uninit secondary");
+			netvsc_mp_uninit_secondary();
+		}
+	}
+	rte_spinlock_unlock(&netvsc_shared_data_lock);
 
 	eth_dev = rte_eth_dev_allocated(dev->device.name);
 	if (!eth_dev)
