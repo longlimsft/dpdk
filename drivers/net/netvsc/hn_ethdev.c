@@ -41,6 +41,26 @@
 #include "hn_nvs.h"
 #include "ndis.h"
 
+static struct netvsc_local_data {
+	bool init_done;
+	unsigned int primary_cnt;
+	unsigned int secondary_cnt;
+} netvsc_local_data;
+
+#define NETVSC_MP_NAME "net_netvsc_mp"
+#define NETVSC_MP_REQ_TIMEOUT_SEC 5
+
+enum netvsc_mp_req_type {
+	NETVSC_MP_REQ_VF_REMOVE = 1,
+	NETVSC_MP_REQ_VF_ADD,
+};
+
+struct netvsc_mp_param {
+	enum netvsc_mp_req_type type;
+	int port_id;
+	int result;
+};
+
 #define HN_TX_OFFLOAD_CAPS (RTE_ETH_TX_OFFLOAD_IPV4_CKSUM | \
 			    RTE_ETH_TX_OFFLOAD_TCP_CKSUM  | \
 			    RTE_ETH_TX_OFFLOAD_UDP_CKSUM  | \
@@ -1425,6 +1445,171 @@ eth_hn_dev_uninit(struct rte_eth_dev *eth_dev)
 	return ret_stop;
 }
 
+static int netvsc_mp_primary_handle(const struct rte_mp_msg *mp_msg __rte_unused, const void *peer __rte_unused)
+{
+	return 0;
+}
+
+static void
+mp_init_msg(struct rte_mp_msg *msg, enum netvsc_mp_req_type type, int port_id)
+{
+	struct netvsc_mp_param *param;
+
+	strlcpy(msg->name, NETVSC_MP_NAME, sizeof(msg->name));
+	msg->len_param = sizeof(*param);
+
+	param = (struct netvsc_mp_param *)msg->param;
+	param->type = type;
+	param->port_id = port_id;
+}
+
+static int netvsc_mp_secondary_handle(const struct rte_mp_msg *mp_msg, const void *peer)
+{
+	struct rte_mp_msg mp_res = { 0 };
+	struct netvsc_mp_param *res = (struct netvsc_mp_param *) mp_res.param;
+	const struct netvsc_mp_param *param =
+		(const struct netvsc_mp_param *) mp_msg->param;
+//	struct rte_eth_dev *dev;
+	int ret = 0;
+
+	if (!rte_eth_dev_is_valid_port(param->port_id)) {
+		PMD_DRV_LOG(ERR, "MP handle port ID %u invalid", param->port_id);
+		return -ENODEV;
+	}
+
+//	dev = &rte_eth_devices[param->port_id];
+	mp_init_msg(&mp_res, param->type, param->port_id);
+
+	switch (param->type) {
+	case NETVSC_MP_REQ_VF_REMOVE:
+		/* remove the VF from DPDK and netvsc */
+		res->result = ret;
+		ret = rte_mp_reply(&mp_res, peer);
+		break;
+
+	case NETVSC_MP_REQ_VF_ADD:
+		/* add the VF to DPDK and netvsc */
+		res->result = ret;
+		ret = rte_mp_reply(&mp_res, peer);
+		break;
+
+	default:
+		PMD_DRV_LOG(ERR, "Port %u unknown primary MP type %u",
+			param->port_id, param->type);
+		ret = -EINVAL;
+	}
+
+	return ret;
+}
+
+static int netvsc_mp_init_primary(void)
+{
+	int ret;
+	ret = rte_mp_action_register(NETVSC_MP_NAME, netvsc_mp_primary_handle);
+	if (ret && rte_errno != ENOTSUP) {
+		PMD_DRV_LOG(ERR, "Failed to register primary handler %d %d",
+			ret, rte_errno);
+		return -1;
+	}
+
+	return 0;
+}
+
+/*
+static int netvsc_mp_uninit_primary(void)
+{
+	return 0;
+}
+*/
+
+static int netvsc_mp_init_secondary(void)
+{
+	return rte_mp_action_register(NETVSC_MP_NAME, netvsc_mp_secondary_handle);
+}
+
+/*
+static int netvsc_mp_uninit_secondary(void)
+{
+	return 0;
+}
+*/
+
+static void netvsc_mp_req_VF(struct rte_eth_dev *dev, enum netvsc_mp_req_type type)
+{
+	struct rte_mp_msg mp_req = { 0 };
+	struct rte_mp_msg *mp_res;
+	struct rte_mp_reply mp_rep;
+	struct netvsc_mp_param *res;
+	struct timespec ts = {.tv_sec = NETVSC_MP_REQ_TIMEOUT_SEC, .tv_nsec = 0};
+	int i, ret;
+
+	// if secondary count is 0, return
+	//
+	
+	mp_init_msg(&mp_req, type, dev->data->port_id);
+
+	ret = rte_mp_request_sync(&mp_req, &mp_rep, &ts);
+	if (ret) {
+		if (rte_errno != ENOTSUP)
+			PMD_DRV_LOG(ERR, "port %u failed to request VF remove",
+				    dev->data->port_id);
+		goto exit;
+	}
+
+	if (mp_rep.nb_sent != mp_rep.nb_received) {
+		PMD_DRV_LOG(ERR, "port %u not all secondaries responded type %d",
+			dev->data->port_id, type);
+		goto exit;
+	}
+	for (i = 0; i < mp_rep.nb_received; i++) {
+		mp_res = &mp_rep.msgs[i];
+		res = (struct netvsc_mp_param *)mp_res->param;
+		if (res->result) {
+			PMD_DRV_LOG(ERR, "port %u request failed on secondary %d",
+				dev->data->port_id, i);
+			goto exit;
+		}
+	}
+
+exit:
+	free(mp_rep.msgs);
+}
+
+static int netvsc_init_once(void)
+{
+	int ret;
+
+	if (netvsc_local_data.init_done)
+		return 0;
+
+	switch (rte_eal_process_type()) {
+	case RTE_PROC_PRIMARY:
+		ret = netvsc_mp_init_primary();
+		if (ret)
+			break;
+
+		PMD_DRV_LOG(INFO, "MP INIT PRIMARY");
+		netvsc_local_data.init_done = true;
+		break;
+
+	case RTE_PROC_SECONDARY:
+		ret = netvsc_mp_init_secondary();
+		if (ret)
+			break;
+
+		PMD_DRV_LOG(INFO, "MP INIT SECONDARY");
+		netvsc_local_data.init_done = true;
+		break;
+
+	default:
+		/* Impossible */
+		ret = -EPROTO;
+		break;
+	}
+
+	return ret;
+}
+
 static int eth_hn_probe(struct rte_vmbus_driver *drv __rte_unused,
 			struct rte_vmbus_device *dev)
 {
@@ -1433,6 +1618,8 @@ static int eth_hn_probe(struct rte_vmbus_driver *drv __rte_unused,
 	int ret = 0;
 
 	PMD_INIT_FUNC_TRACE();
+
+	netvsc_init_once();
 
 	ret = rte_dev_event_monitor_start();
 	if (ret) {
