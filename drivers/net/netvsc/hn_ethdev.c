@@ -58,6 +58,7 @@ enum netvsc_mp_req_type {
 struct netvsc_mp_param {
 	enum netvsc_mp_req_type type;
 	int port_id;
+	char dev_name[60];
 	int result;
 };
 
@@ -1463,13 +1464,104 @@ mp_init_msg(struct rte_mp_msg *msg, enum netvsc_mp_req_type type, int port_id)
 	param->port_id = port_id;
 }
 
+static int netvsc_secondary_handle_device_remove(struct hn_data *hv)
+{
+	uint16_t port_id = hv->vf_ctx.vf_port;
+	struct rte_device *dev = rte_eth_devices[port_id].device;
+	bool all_eth_removed;
+
+	PMD_DRV_LOG(ERR, "%s: Netvsc port id %d VF port id %d", __func__, hv->port_id, port_id);
+
+	rte_rwlock_write_lock(&hv->vf_lock);
+
+	rte_eth_dev_stop(port_id);
+	rte_eth_dev_close(port_id);
+
+	all_eth_removed = true;
+	RTE_ETH_FOREACH_DEV_OF(port_id, dev) {
+		if (rte_eth_devices[port_id].state != RTE_ETH_DEV_UNUSED) {
+			all_eth_removed = false;
+			break;
+		}
+	}
+	if (all_eth_removed)
+		rte_dev_remove(dev);
+
+	rte_rwlock_write_unlock(&hv->vf_lock);
+
+	return 0;
+}
+
+static int netvsc_secondary_handle_device_add(struct rte_eth_dev *dev, struct hn_data *hv, char *dev_name)
+{
+	char buf[256];
+	struct dirent *dir;
+	struct ifreq req;
+	struct rte_ether_addr eth_addr;
+	int s;
+	DIR *di = NULL;
+	int ret;
+
+	snprintf(buf, sizeof(buf), "/sys/bus/pci/devices/%s/net", dev_name);
+	di = opendir(buf);
+	while ((dir = readdir(di))) {
+		/* Skip . and .. directories */
+		if (!strcmp(dir->d_name, ".") || !strcmp(dir->d_name, ".."))
+			continue;
+
+		/* trying to get mac address if this is a network device*/
+		s = socket(PF_INET, SOCK_DGRAM, IPPROTO_IP);
+		if (s == -1) {
+			PMD_DRV_LOG(ERR, "Failed to create socket errno %d",
+				    errno);
+			break;
+		}
+		strlcpy(req.ifr_name, dir->d_name, sizeof(req.ifr_name));
+		ret = ioctl(s, SIOCGIFHWADDR, &req);
+		close(s);
+		if (ret == -1) {
+			PMD_DRV_LOG(ERR,
+				    "Failed to send SIOCGIFHWADDR for device %s",
+				    dir->d_name);
+			break;
+		}
+		if (req.ifr_hwaddr.sa_family != ARPHRD_ETHER)
+			continue;
+
+		memcpy(eth_addr.addr_bytes, req.ifr_hwaddr.sa_data,
+		       RTE_DIM(eth_addr.addr_bytes));
+
+		if (rte_is_same_ether_addr(&eth_addr, dev->data->mac_addrs)) {
+			PMD_DRV_LOG(NOTICE,
+				    "Found matching MAC address, adding network device %s", dir->d_name);
+
+			/* If this device has been hot removed from this
+			 * parent device, restore its args.
+			 */
+			ret = rte_eal_hotplug_add("pci", dev_name, "");
+			if (ret) {
+				PMD_DRV_LOG(ERR,
+					    "Failed to add PCI device %s",
+					    dev_name);
+			}
+
+//			hn_vf_add(dev, hv);
+			break;
+		}
+
+	}
+
+	return 0;
+}
+
 static int netvsc_mp_secondary_handle(const struct rte_mp_msg *mp_msg, const void *peer)
 {
 	struct rte_mp_msg mp_res = { 0 };
 	struct netvsc_mp_param *res = (struct netvsc_mp_param *) mp_res.param;
 	const struct netvsc_mp_param *param =
 		(const struct netvsc_mp_param *) mp_msg->param;
-//	struct rte_eth_dev *dev;
+	struct rte_eth_dev *dev;
+	struct hn_data *hv;
 	int ret = 0;
 
 	if (!rte_eth_dev_is_valid_port(param->port_id)) {
@@ -1477,19 +1569,21 @@ static int netvsc_mp_secondary_handle(const struct rte_mp_msg *mp_msg, const voi
 		return -ENODEV;
 	}
 
-//	dev = &rte_eth_devices[param->port_id];
+	dev = &rte_eth_devices[param->port_id];
+	hv = dev->data->dev_private;
+
 	mp_init_msg(&mp_res, param->type, param->port_id);
 
 	switch (param->type) {
 	case NETVSC_MP_REQ_VF_REMOVE:
 		/* remove the VF from DPDK and netvsc */
-		res->result = ret;
+		res->result = netvsc_secondary_handle_device_remove(hv);
 		ret = rte_mp_reply(&mp_res, peer);
 		break;
 
 	case NETVSC_MP_REQ_VF_ADD:
 		/* add the VF to DPDK and netvsc */
-		res->result = ret;
+		res->result = netvsc_secondary_handle_device_add(dev, hv, param->dev_name);
 		ret = rte_mp_reply(&mp_res, peer);
 		break;
 
