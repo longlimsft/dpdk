@@ -247,4 +247,4 @@ enum netvsc_mp_req_type {
 	NETVSC_MP_REQ_VF_REMOVE = 1,
 	NETVSC_MP_REQ_VF_ADD,
 };
-void netvsc_mp_req_VF(struct rte_eth_dev *dev, enum netvsc_mp_req_type type);
+void netvsc_mp_req_VF(struct hn_data *hv, enum netvsc_mp_req_type type);

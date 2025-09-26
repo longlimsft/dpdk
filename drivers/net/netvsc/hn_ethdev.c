@@ -48,7 +48,7 @@ static struct netvsc_local_data {
 } netvsc_local_data;
 
 #define NETVSC_MP_NAME "net_netvsc_mp"
-#define NETVSC_MP_REQ_TIMEOUT_SEC 5
+#define NETVSC_MP_REQ_TIMEOUT_SEC 20
 
 struct netvsc_mp_param {
 	enum netvsc_mp_req_type type;
@@ -1462,31 +1462,18 @@ mp_init_msg(struct rte_mp_msg *msg, enum netvsc_mp_req_type type, int port_id)
 static int netvsc_secondary_handle_device_remove(struct hn_data *hv)
 {
 	uint16_t port_id = hv->vf_ctx.vf_port;
-	struct rte_device *dev = rte_eth_devices[port_id].device;
-	bool all_eth_removed;
 
 	PMD_DRV_LOG(ERR, "%s: Netvsc port id %d VF port id %d", __func__, hv->port_id, port_id);
 
-	rte_rwlock_write_lock(&hv->vf_lock);
+	/* VF is already locked by primary */
 
 	rte_eth_dev_stop(port_id);
 	rte_eth_dev_close(port_id);
 
-	all_eth_removed = true;
-	RTE_ETH_FOREACH_DEV_OF(port_id, dev) {
-		if (rte_eth_devices[port_id].state != RTE_ETH_DEV_UNUSED) {
-			all_eth_removed = false;
-			break;
-		}
-	}
-	if (all_eth_removed)
-		rte_dev_remove(dev);
-
-	rte_rwlock_write_unlock(&hv->vf_lock);
-
 	return 0;
 }
 
+#if 0
 static int netvsc_secondary_handle_device_add(struct rte_eth_dev *dev, struct hn_data *hv, char *dev_name)
 {
 	char buf[256];
@@ -1548,6 +1535,7 @@ static int netvsc_secondary_handle_device_add(struct rte_eth_dev *dev, struct hn
 
 	return 0;
 }
+#endif
 
 static int netvsc_mp_secondary_handle(const struct rte_mp_msg *mp_msg, const void *peer)
 {
@@ -1576,11 +1564,11 @@ static int netvsc_mp_secondary_handle(const struct rte_mp_msg *mp_msg, const voi
 		ret = rte_mp_reply(&mp_res, peer);
 		break;
 
-	case NETVSC_MP_REQ_VF_ADD:
+//	case NETVSC_MP_REQ_VF_ADD:
 		/* add the VF to DPDK and netvsc */
-		res->result = netvsc_secondary_handle_device_add(dev, hv, param->dev_name);
-		ret = rte_mp_reply(&mp_res, peer);
-		break;
+//		res->result = netvsc_secondary_handle_device_add(dev, hv, param->dev_name);
+//		ret = rte_mp_reply(&mp_res, peer);
+//		break;
 
 	default:
 		PMD_DRV_LOG(ERR, "Port %u unknown primary MP type %u",
@@ -1623,7 +1611,7 @@ static int netvsc_mp_uninit_secondary(void)
 }
 */
 
-void netvsc_mp_req_VF(struct rte_eth_dev *dev, enum netvsc_mp_req_type type)
+void netvsc_mp_req_VF(struct hn_data *hv, enum netvsc_mp_req_type type)
 {
 	struct rte_mp_msg mp_req = { 0 };
 	struct rte_mp_msg *mp_res;
@@ -1635,19 +1623,19 @@ void netvsc_mp_req_VF(struct rte_eth_dev *dev, enum netvsc_mp_req_type type)
 	// if secondary count is 0, return
 	//
 	
-	mp_init_msg(&mp_req, type, dev->data->port_id);
+	mp_init_msg(&mp_req, type, hv->port_id);
 
 	ret = rte_mp_request_sync(&mp_req, &mp_rep, &ts);
 	if (ret) {
 		if (rte_errno != ENOTSUP)
 			PMD_DRV_LOG(ERR, "port %u failed to request VF remove",
-				    dev->data->port_id);
+				    hv->port_id);
 		goto exit;
 	}
 
 	if (mp_rep.nb_sent != mp_rep.nb_received) {
 		PMD_DRV_LOG(ERR, "port %u not all secondaries responded type %d",
-			dev->data->port_id, type);
+			    hv->port_id, type);
 		goto exit;
 	}
 	for (i = 0; i < mp_rep.nb_received; i++) {
@@ -1655,7 +1643,7 @@ void netvsc_mp_req_VF(struct rte_eth_dev *dev, enum netvsc_mp_req_type type)
 		res = (struct netvsc_mp_param *)mp_res->param;
 		if (res->result) {
 			PMD_DRV_LOG(ERR, "port %u request failed on secondary %d",
-				dev->data->port_id, i);
+				    hv->port_id, i);
 			goto exit;
 		}
 	}
