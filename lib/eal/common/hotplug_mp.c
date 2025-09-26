@@ -236,6 +236,8 @@ static void __handle_primary_request(void *param)
 	struct rte_bus *bus;
 	int ret = 0;
 
+	printf("%s req->t %d\n", __func__, req->t);
+
 	memset(&mp_resp, 0, sizeof(mp_resp));
 
 	switch (req->t) {
@@ -282,6 +284,7 @@ static void __handle_primary_request(void *param)
 			goto quit;
 		}
 
+		printf("%s: calling local_dev_remove\n", __func__);
 		ret = local_dev_remove(dev);
 quit:
 		rte_devargs_reset(da);

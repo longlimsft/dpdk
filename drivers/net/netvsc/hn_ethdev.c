@@ -50,11 +50,6 @@ static struct netvsc_local_data {
 #define NETVSC_MP_NAME "net_netvsc_mp"
 #define NETVSC_MP_REQ_TIMEOUT_SEC 5
 
-enum netvsc_mp_req_type {
-	NETVSC_MP_REQ_VF_REMOVE = 1,
-	NETVSC_MP_REQ_VF_ADD,
-};
-
 struct netvsc_mp_param {
 	enum netvsc_mp_req_type type;
 	int port_id;
@@ -1628,7 +1623,7 @@ static int netvsc_mp_uninit_secondary(void)
 }
 */
 
-static void netvsc_mp_req_VF(struct rte_eth_dev *dev, enum netvsc_mp_req_type type)
+void netvsc_mp_req_VF(struct rte_eth_dev *dev, enum netvsc_mp_req_type type)
 {
 	struct rte_mp_msg mp_req = { 0 };
 	struct rte_mp_msg *mp_res;

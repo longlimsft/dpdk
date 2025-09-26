@@ -151,6 +151,8 @@ static void hn_remove_delayed(void *args)
 		PMD_DRV_LOG(ERR, "rte_eth_dev_close failed port_id=%u ret=%d",
 			    port_id, ret);
 
+	netvsc_mp_req_VF(&rte_eth_devices[port_id], NETVSC_MP_REQ_VF_REMOVE);
+
 	/* Remove the rte device when all its eth devices are removed */
 	all_eth_removed = true;
 	RTE_ETH_FOREACH_DEV_OF(port_id, dev) {
