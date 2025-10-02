@@ -1470,13 +1470,14 @@ mp_init_msg(struct rte_mp_msg *msg, enum netvsc_mp_req_type type, int port_id)
 
 static int netvsc_secondary_handle_device_remove(struct hn_data *hv)
 {
-	int ret;
+//	int ret;
 	uint16_t port_id = hv->vf_ctx.vf_port;
+	struct rte_eth_dev *dev;
 
 	PMD_DRV_LOG(DEBUG, "Secondary handle eth device remove port id %d VF port id %d", hv->port_id, port_id);
 
 	/* VF is already locked by primary */
-
+/*
 	ret = rte_eth_dev_stop(port_id);
 	if (ret) {
 		PMD_DRV_LOG(ERR, "Secondary failed to stop device %d", ret);
@@ -1486,8 +1487,11 @@ static int netvsc_secondary_handle_device_remove(struct hn_data *hv)
 	ret = rte_eth_dev_close(port_id);
 	if (ret)
 		PMD_DRV_LOG(ERR, "Secondary failed to close device %d", ret);
+		*/
+	dev = &rte_eth_devices[port_id];
+	return rte_eth_dev_release_port(dev);
 
-	return ret;
+//	return ret;
 }
 
 static int netvsc_mp_secondary_handle(const struct rte_mp_msg *mp_msg, const void *peer)
@@ -1604,6 +1608,7 @@ exit:
 static int netvsc_init_once(void)
 {
 	int ret;
+	const struct rte_memzone *secondary_mz;
 
 	if (netvsc_local_data.init_done)
 		return 0;
@@ -1629,6 +1634,12 @@ static int netvsc_init_once(void)
 		break;
 
 	case RTE_PROC_SECONDARY:
+		secondary_mz = rte_memzone_lookup(MZ_NETVSC_SHARED_DATA);
+		if (!secondary_mz) {
+			PMD_DRV_LOG(ERR, "Cannot attach netvsc shared data");
+			return -rte_errno;
+		}
+		netvsc_shared_data = secondary_mz->addr;
 		ret = netvsc_mp_init_secondary();
 		if (ret)
 			break;
