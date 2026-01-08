@@ -144,7 +144,8 @@ static void hn_remove_delayed(void *args)
 
 	/* Record the device parameters for possible hotplug events */
 	if (dev->devargs && dev->devargs->args)
-		hv->vf_devargs = strdup(dev->devargs->args);
+		if (!hv->vf_devargs)
+			hv->vf_devargs = strdup(dev->devargs->args);
 
 	ret = rte_eth_dev_close(port_id);
 	if (ret)
