@@ -282,6 +282,16 @@ mana_dev_close(struct rte_eth_dev *dev)
 	if (ret)
 		return ret;
 
+	if (priv->ib_parent_pd) {
+		ibv_dealloc_pd(priv->ib_parent_pd);
+		priv->ib_parent_pd = NULL;
+	}
+
+	if (priv->ib_pd) {
+		ibv_dealloc_pd(priv->ib_pd);
+		priv->ib_pd = NULL;
+	}
+
 	ret = ibv_close_device(priv->ib_ctx);
 	if (ret) {
 		ret = errno;
