@@ -145,6 +145,11 @@ mana_mp_secondary_handle(const struct rte_mp_msg *mp_msg, const void *peer)
 		dev->tx_pkt_burst = mana_tx_burst;
 		dev->rx_pkt_burst = mana_rx_burst;
 
+                DRV_LOG(DEBUG, "eth_dev rx_queues %p tx_queues %p", dev->data->rx_queues, dev->data->tx_queues);
+
+		rte_eth_fp_ops[param->port_id].rxq.data = dev->data->rx_queues;
+		rte_eth_fp_ops[param->port_id].txq.data = dev->data->tx_queues;
+
 		rte_mb();
 
 		res->result = 0;
