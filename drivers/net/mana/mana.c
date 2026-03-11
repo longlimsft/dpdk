@@ -14,6 +14,7 @@
 #include <rte_kvargs.h>
 #include <rte_eal_paging.h>
 #include <rte_pci.h>
+#include <rte_rcu_qsbr.h>
 
 #include <infiniband/verbs.h>
 #include <infiniband/manadv.h>
@@ -103,6 +104,17 @@ mana_dev_configure(struct rte_eth_dev *dev)
 			      RTE_ETH_RX_OFFLOAD_VLAN_STRIP);
 
 	priv->num_queues = dev->data->nb_rx_queues;
+
+	/*
+	 * Now we know the total number of rx and tx queues.
+	 * Register the rcu qsv thread.
+	 */
+	for (unsigned int i = 0; i < (unsigned int)(2 * priv->num_queues); i++) {
+		if (rte_rcu_qsbr_thread_register(priv->dev_state_qsv, i) != 0) {
+			DRV_LOG(ERR, "Failed to register rcu qsv thread "
+				"%d of total %d", i, 2 * priv->num_queues - 1);
+		}
+	}
 
 	manadv_set_context_attr(priv->ib_ctx, MANADV_CTX_ATTR_BUF_ALLOCATORS,
 				(void *)((uintptr_t)&(struct manadv_ctx_allocators){
@@ -243,7 +255,10 @@ mana_dev_stop(struct rte_eth_dev *dev)
 	int ret;
 	struct mana_priv *priv = dev->data->dev_private;
 
-	rxq_intr_disable(priv);
+	if (priv->dev_state == MANA_DEV_ACTIVE) {
+		rxq_intr_disable(priv);
+		DRV_LOG(DEBUG, "rxq_intr_disable called");
+	}
 
 	dev->tx_pkt_burst = mana_tx_burst_removed;
 	dev->rx_pkt_burst = mana_rx_burst_removed;
@@ -255,13 +270,13 @@ mana_dev_stop(struct rte_eth_dev *dev)
 
 	ret = mana_stop_tx_queues(dev);
 	if (ret) {
-		DRV_LOG(ERR, "failed to stop tx queues");
+		DRV_LOG(ERR, "failed to stop tx queues, ret %d", ret);
 		return ret;
 	}
 
 	ret = mana_stop_rx_queues(dev);
 	if (ret) {
-		DRV_LOG(ERR, "failed to stop tx queues");
+		DRV_LOG(ERR, "failed to stop rx queues, ret %d", ret);
 		return ret;
 	}
 
@@ -278,28 +293,35 @@ mana_dev_close(struct rte_eth_dev *dev)
 
 	mana_remove_all_mr(priv);
 
-	ret = mana_intr_uninstall(priv);
-	if (ret)
-		return ret;
+	if (priv->dev_state == MANA_DEV_ACTIVE) {
+		ret = mana_intr_uninstall(priv);
+		if (ret)
+			return ret;
+	}
 
 	if (priv->ib_parent_pd) {
-		int err = ibv_dealloc_pd(priv->ib_parent_pd);
-		if (err)
-			DRV_LOG(ERR, "Failed to deallocate parent PD: %d", err);
+		ret = ibv_dealloc_pd(priv->ib_parent_pd);
+		if (ret)
+			DRV_LOG(ERR,
+				"Failed to deallocate parent PD: %d", ret);
+
 		priv->ib_parent_pd = NULL;
 	}
 
 	if (priv->ib_pd) {
-		int err = ibv_dealloc_pd(priv->ib_pd);
-		if (err)
-			DRV_LOG(ERR, "Failed to deallocate PD: %d", err);
+		ret = ibv_dealloc_pd(priv->ib_pd);
+		if (ret)
+			DRV_LOG(ERR, "Failed to deallocate PD: %d", ret);
+
 		priv->ib_pd = NULL;
 	}
 
-	ret = ibv_close_device(priv->ib_ctx);
-	if (ret) {
-		ret = errno;
-		return ret;
+	if (priv->dev_state == MANA_DEV_ACTIVE) {
+		ret = ibv_close_device(priv->ib_ctx);
+		if (ret) {
+			ret = errno;
+			return ret;
+		}
 	}
 
 	return 0;
@@ -1031,8 +1053,168 @@ mana_ibv_device_to_pci_addr(const struct ibv_device *device,
 	return 0;
 }
 
+static int mana_pci_probe(struct rte_pci_driver *pci_drv,
+			  struct rte_pci_device *pci_dev);
+static void mana_intr_handler(void *arg);
+
+static void
+mana_intr_handle_cleanup(struct rte_intr_handle *intr_handle __rte_unused,
+			 void *arg)
+{
+	struct mana_priv *old_priv = (struct mana_priv *)arg;
+
+	DRV_LOG(DEBUG, "Interrupt handle cleanup called, priv = %p",
+		old_priv);
+	if (old_priv && old_priv->intr_handle) {
+		DRV_LOG(ERR, "Free intr_handle");
+		rte_intr_instance_free(old_priv->intr_handle);
+	}
+
+	if (old_priv) {
+		DRV_LOG(DEBUG, "Priv %p no longer needed, freeing", old_priv);
+		rte_free(old_priv);
+	}
+
+	return;
+}
+
+static void
+mana_reset_enter(struct mana_priv *priv)
+{
+	int ret;
+	uint64_t ticket;
+	struct rte_eth_dev *dev = &rte_eth_devices[priv->port_id];
+
+	priv->dev_state = MANA_DEV_RESET_ENTER;
+	rte_wmb();
+
+	DRV_LOG(DEBUG, "Entering into device reset state");
+	DRV_LOG(DEBUG, "Resetting dev = %p, priv = %p", dev, priv);
+
+	ticket = rte_rcu_qsbr_start(priv->dev_state_qsv);
+
+	while (rte_rcu_qsbr_check(priv->dev_state_qsv, ticket, false) == 0) {
+		rte_pause();
+	}
+
+	DRV_LOG(DEBUG, "All threads are quiescent");
+	ret = mana_dev_stop(dev);
+	if (ret) {
+		DRV_LOG(ERR, "Failed to stop mana dev ret %d", ret);
+		priv->dev_state = MANA_DEV_ACTIVE;
+		goto out;
+	}
+
+	ret = mana_dev_close(dev);
+	if (ret) {
+		DRV_LOG(ERR, "Failed to close mana dev ret %d", ret);
+		priv->dev_state = MANA_DEV_ACTIVE;
+		goto out;
+	}
+
+	DRV_LOG(DEBUG, "Reset processing exited successfully");
+
+	priv->dev_state = MANA_DEV_RESET_EXIT;
+	rte_wmb();
+	DRV_LOG(DEBUG, "Waiting for reset complete event");
+
+out:
+	return;
+}
+
+static void
+mana_reset_exit(struct mana_priv *priv)
+{
+	int i, ret;
+	struct mana_priv *new_priv;
+	struct rte_eth_dev *dev;
+	struct rte_pci_device *pci_dev;
+
+	if (!priv) {
+		DRV_LOG(ERR, "Private structure invalid");
+		goto out;
+	}
+	DRV_LOG(DEBUG, "Entering into device reset complete processing");
+
+	dev = &rte_eth_devices[priv->port_id];
+	pci_dev = RTE_ETH_DEV_TO_PCI(dev);
+
+	DRV_LOG(DEBUG, "Resetting dev = %p, priv = %p", dev, priv);
+
+	rxq_intr_disable(priv);
+
+	/* Uninstall the interrupt handler as no longer needed */
+	ret = rte_intr_callback_unregister_pending(priv->intr_handle,
+						   mana_intr_handler, priv,
+						   mana_intr_handle_cleanup);
+	if (ret < 0) {
+		DRV_LOG(ERR, "Failed to unregister intr_handle ret %d",
+			ret);
+	} else {
+		DRV_LOG(DEBUG,
+			"%d intr callback marked for removal", ret);
+	}
+
+	ret = ibv_close_device(priv->ib_ctx);
+	if (ret) {
+		DRV_LOG(ERR, "Failed to close ibv device %d", ret);
+		goto out;
+	}
+
+	/*
+	 * Calling mana_pci_probe. If succeeded, it should have
+	 * a new priv structure.
+	 */
+	ret = mana_pci_probe(NULL, pci_dev);
+	if (ret) {
+		DRV_LOG(ERR, "Failed to probe mana pci dev ret %d", ret);
+		goto out;
+	}
+
+	/* The original dev structure is untouched */
+	ret = mana_dev_configure(dev);
+	if (ret) {
+		DRV_LOG(ERR, "Failed to configure mana dev %p ret %d",
+			dev, ret);
+		goto out;
+	}
+
+	/* Now getting the new priv structure and init some of its fields */
+	new_priv = dev->data->dev_private;
+	new_priv->dev_state = MANA_DEV_RESET_EXIT;
+	rte_wmb();
+
+	/*
+	 * The priv of the rxq and txq are still pointing to the old one.
+	 * Make them pointing to the new priv.
+	 */
+	for (i = 0; i < new_priv->num_queues; i++) {
+		struct mana_rxq *rxq = dev->data->rx_queues[i];
+		struct mana_txq *txq = dev->data->tx_queues[i];
+
+		rxq->priv = new_priv;
+		txq->priv = new_priv;
+	}
+	DRV_LOG(DEBUG, "new_priv %p, num_queues %u",
+		new_priv, new_priv->num_queues);
+
+	ret = mana_dev_start(dev);
+	if (ret) {
+		DRV_LOG(ERR, "Failed to start mana dev ret %d", ret);
+		/* Passthrough. Still change the device state */
+	}
+
+	rte_wmb();
+	new_priv->dev_state = MANA_DEV_ACTIVE;
+	DRV_LOG(DEBUG, "Exiting the reset complete processing");
+
+out:
+	return;
+}
+
 /*
- * Interrupt handler from IB layer to notify this device is being removed.
+ * Interrupt handler from IB layer to notify this device is
+ * being removed or reset.
  */
 static void
 mana_intr_handler(void *arg)
@@ -1040,19 +1222,46 @@ mana_intr_handler(void *arg)
 	struct mana_priv *priv = arg;
 	struct ibv_context *ctx = priv->ib_ctx;
 	struct ibv_async_event event;
+	struct rte_eth_dev *dev;
 
 	/* Read and ack all messages from IB device */
 	while (true) {
 		if (ibv_get_async_event(ctx, &event))
 			break;
 
-		if (event.event_type == IBV_EVENT_DEVICE_FATAL) {
-			struct rte_eth_dev *dev;
-
+		switch (event.event_type) {
+		case IBV_EVENT_DEVICE_FATAL:
 			dev = &rte_eth_devices[priv->port_id];
 			if (dev->data->dev_conf.intr_conf.rmv)
 				rte_eth_dev_callback_process(dev,
 					RTE_ETH_EVENT_INTR_RMV, NULL);
+			break;
+
+		case IBV_EVENT_PORT_ERR:
+			DRV_LOG(INFO, "Device reset event received");
+			if (priv->dev_state == MANA_DEV_ACTIVE) {
+				mana_reset_enter(priv);
+			} else {
+				DRV_LOG(ERR, "Already in Event 135");
+			}
+			break;
+
+		case IBV_EVENT_PORT_ACTIVE:
+			DRV_LOG(INFO, "Device reset Complete event received");
+			if (priv->dev_state == MANA_DEV_RESET_EXIT) {
+				mana_reset_exit(priv);
+			} else {
+				if (priv->dev_state == MANA_DEV_ACTIVE)
+					DRV_LOG(ERR, "Not in "
+						"MANA_DEV_RESET_EXIT state");
+				else
+					DRV_LOG(ERR, "Still in "
+						"MANA_DEV_RESET_ENTER state");
+			}
+			break;
+
+		default:
+			break;
 		}
 
 		ibv_ack_async_event(&event);
@@ -1294,9 +1503,11 @@ mana_probe_port(struct ibv_device *ibdev, struct ibv_device_attr_ex *dev_attr,
 	char name[RTE_ETH_NAME_MAX_LEN];
 	int ret;
 	struct ibv_context *ctx = NULL;
+	size_t sz;
 
 	rte_ether_format_addr(address, sizeof(address), addr);
-	DRV_LOG(INFO, "device located port %u address %s", port, address);
+
+	DRV_LOG(DEBUG, "device located port %u address %s", port, address);
 
 	priv = rte_zmalloc_socket(NULL, sizeof(*priv), RTE_CACHE_LINE_SIZE,
 				  SOCKET_ID_ANY);
@@ -1355,21 +1566,33 @@ mana_probe_port(struct ibv_device *ibdev, struct ibv_device_attr_ex *dev_attr,
 		goto failed;
 	}
 
-	eth_dev = rte_eth_dev_allocate(name);
+	eth_dev = rte_eth_dev_allocated(name);
+
 	if (!eth_dev) {
-		ret = -ENOMEM;
-		goto failed;
-	}
+		eth_dev = rte_eth_dev_allocate(name);
+		if (!eth_dev) {
+			ret = -ENOMEM;
+			goto failed;
+		}
 
-	eth_dev->data->mac_addrs =
-		rte_calloc("mana_mac", 1,
-			   sizeof(struct rte_ether_addr), 0);
-	if (!eth_dev->data->mac_addrs) {
-		ret = -ENOMEM;
-		goto failed;
-	}
+		eth_dev->data->mac_addrs =
+			rte_calloc("mana_mac", 1,
+				   sizeof(struct rte_ether_addr), 0);
+		if (!eth_dev->data->mac_addrs) {
+			ret = -ENOMEM;
+			goto failed;
+		}
 
-	rte_ether_addr_copy(addr, eth_dev->data->mac_addrs);
+		rte_ether_addr_copy(addr, eth_dev->data->mac_addrs);
+	} else {
+		/*
+		 * Reset path. The eth_dev shuold already exist.
+		 */
+		rte_ether_format_addr(address, RTE_ETHER_ADDR_FMT_SIZE,
+				      eth_dev->data->mac_addrs);
+		DRV_LOG(DEBUG, "Found existing eth_dev %p with mac addr %s",
+			eth_dev, address);
+	}
 
 	priv->ib_pd = ibv_alloc_pd(ctx);
 	if (!priv->ib_pd) {
@@ -1417,11 +1640,32 @@ mana_probe_port(struct ibv_device *ibdev, struct ibv_device_attr_ex *dev_attr,
 
 	rte_eth_copy_pci_info(eth_dev, pci_dev);
 
+	/*
+	 * Now we've got maximum queues. Init the qsv to be the
+	 * double of maximum queues for both rx and tx queues.
+	 */
+	sz = rte_rcu_qsbr_get_memsize(2 * priv->max_rx_queues);
+	priv->dev_state_qsv = rte_zmalloc_socket("mana_rcu", sz,
+					    RTE_CACHE_LINE_SIZE,
+					    SOCKET_ID_ANY);
+	if (!priv->dev_state_qsv) {
+		DRV_LOG(ERR, "No memory for dev_state_qsv");
+		ret = -ENOMEM;
+		goto failed;
+	}
+	ret = rte_rcu_qsbr_init(priv->dev_state_qsv, 2 * priv->max_rx_queues);
+	if (ret < 0) {
+		DRV_LOG(ERR, "Init dev_state_qsv failed ret %d", ret);
+		goto failed;
+	}
+
 	/* Create async interrupt handler */
 	ret = mana_intr_install(eth_dev, priv);
 	if (ret) {
-		DRV_LOG(ERR, "Failed to install intr handler");
+		DRV_LOG(ERR, "Failed to install intr handler, ret %d", ret);
 		goto failed;
+	} else {
+		DRV_LOG(INFO, "mana_intr_install succeeded");
 	}
 
 	eth_dev->device = &pci_dev->device;
@@ -1439,6 +1683,9 @@ mana_probe_port(struct ibv_device *ibdev, struct ibv_device_attr_ex *dev_attr,
 failed:
 	/* Free the resource for the port failed */
 	if (priv) {
+		if (priv->dev_state_qsv)
+			rte_free(priv->dev_state_qsv);
+
 		if (priv->ib_parent_pd)
 			ibv_dealloc_pd(priv->ib_parent_pd);
 

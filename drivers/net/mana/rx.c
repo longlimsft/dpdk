@@ -2,6 +2,7 @@
  * Copyright 2022 Microsoft Corporation
  */
 #include <ethdev_driver.h>
+#include <rte_rcu_qsbr.h>
 
 #include <infiniband/verbs.h>
 #include <infiniband/manadv.h>
@@ -253,6 +254,8 @@ mana_start_rx_queues(struct rte_eth_dev *dev)
 		struct mana_rxq *rxq = dev->data->rx_queues[i];
 		struct ibv_wq_init_attr wq_attr = {};
 
+		rxq->rxq_idx = i;
+
 		manadv_set_context_attr(priv->ib_ctx,
 			MANADV_CTX_ATTR_BUF_ALLOCATORS,
 			(void *)((uintptr_t)&(struct manadv_ctx_allocators){
@@ -448,6 +451,14 @@ mana_rx_burst(void *dpdk_rxq, struct rte_mbuf **pkts, uint16_t pkts_n)
 	uint32_t pkt_len;
 	uint32_t i;
 	int polled = 0;
+	unsigned int tid = rxq->rxq_idx;
+
+	if (unlikely(priv->dev_state != MANA_DEV_ACTIVE)) {
+		/* Device reset occurred. */
+		return 0;
+	}
+
+	rte_rcu_qsbr_thread_online(priv->dev_state_qsv, tid);
 
 repoll:
 	/* Polling on new completions if we have no backlog */
@@ -587,6 +598,8 @@ drop:
 			DRV_LOG(ERR, "failed to post %d WQEs, ret %d",
 				wqe_consumed, ret);
 	}
+
+	rte_rcu_qsbr_thread_offline(priv->dev_state_qsv, tid);
 
 	return pkt_received;
 }

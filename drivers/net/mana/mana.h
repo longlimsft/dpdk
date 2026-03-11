@@ -337,6 +337,18 @@ struct mana_process_priv {
 	void *db_page;
 };
 
+enum mana_device_state {
+	/* Normal running */
+	MANA_DEV_ACTIVE		= 0,
+	/* In reset enter processing */
+	MANA_DEV_RESET_ENTER	= 1,
+	/*
+	 * Reset enter processing completed.
+	 * Waiting for reset exit or in reset exit processing
+	 */
+	MANA_DEV_RESET_EXIT	= 2,
+};
+
 struct mana_priv {
 	struct rte_eth_dev_data *dev_data;
 	struct mana_process_priv *process_priv;
@@ -368,6 +380,8 @@ struct mana_priv {
 	uint64_t max_mr_size;
 	struct mana_mr_btree mr_btree;
 	rte_spinlock_t	mr_btree_lock;
+	volatile enum mana_device_state dev_state;
+	struct rte_rcu_qsbr *dev_state_qsv;
 };
 
 struct mana_txq_desc {
@@ -427,6 +441,7 @@ struct mana_txq {
 	struct mana_mr_btree mr_btree;
 	struct mana_stats stats;
 	unsigned int socket;
+	unsigned int txq_idx;
 };
 
 struct mana_rxq {
@@ -462,6 +477,7 @@ struct mana_rxq {
 	struct mana_mr_btree mr_btree;
 
 	unsigned int socket;
+	unsigned int rxq_idx;
 };
 
 extern int mana_logtype_driver;

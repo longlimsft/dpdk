@@ -3,6 +3,7 @@
  */
 
 #include <ethdev_driver.h>
+#include <rte_rcu_qsbr.h>
 
 #include <infiniband/verbs.h>
 #include <infiniband/manadv.h>
@@ -82,6 +83,8 @@ mana_start_tx_queues(struct rte_eth_dev *dev)
 		struct manadv_cq dv_cq;
 
 		txq = dev->data->tx_queues[i];
+
+		txq->txq_idx = i;
 
 		manadv_set_context_attr(priv->ib_ctx,
 			MANADV_CTX_ATTR_BUF_ALLOCATORS,
@@ -190,9 +193,17 @@ mana_tx_burst(void *dpdk_txq, struct rte_mbuf **tx_pkts, uint16_t nb_pkts)
 	void *db_page;
 	uint16_t pkt_sent = 0;
 	uint32_t num_comp, i;
+	unsigned int tid = priv->num_queues + txq->txq_idx;
 #ifdef RTE_ARCH_32
 	uint32_t wqe_count = 0;
 #endif
+
+	if (unlikely(priv->dev_state != MANA_DEV_ACTIVE)) {
+		/* Device reset event occurred. */
+		return 0;
+	}
+
+	rte_rcu_qsbr_thread_online(priv->dev_state_qsv, tid);
 
 	/* Process send completions from GDMA */
 	num_comp = gdma_poll_completion_queue(&txq->gdma_cq,
@@ -500,6 +511,8 @@ mana_tx_burst(void *dpdk_txq, struct rte_mbuf **tx_pkts, uint16_t nb_pkts)
 		if (ret)
 			DP_LOG(ERR, "mana_ring_doorbell failed ret %d", ret);
 	}
+
+	rte_rcu_qsbr_thread_offline(priv->dev_state_qsv, tid);
 
 	return pkt_sent;
 }
