@@ -198,12 +198,13 @@ mana_tx_burst(void *dpdk_txq, struct rte_mbuf **tx_pkts, uint16_t nb_pkts)
 	uint32_t wqe_count = 0;
 #endif
 
+	rte_rcu_qsbr_thread_online(priv->dev_state_qsv, tid);
+
 	if (unlikely(priv->dev_state != MANA_DEV_ACTIVE)) {
 		/* Device reset event occurred. */
+		rte_rcu_qsbr_thread_offline(priv->dev_state_qsv, tid);
 		return 0;
 	}
-
-	rte_rcu_qsbr_thread_online(priv->dev_state_qsv, tid);
 
 	/* Process send completions from GDMA */
 	num_comp = gdma_poll_completion_queue(&txq->gdma_cq,

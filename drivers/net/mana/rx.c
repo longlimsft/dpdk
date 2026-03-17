@@ -453,12 +453,13 @@ mana_rx_burst(void *dpdk_rxq, struct rte_mbuf **pkts, uint16_t pkts_n)
 	int polled = 0;
 	unsigned int tid = rxq->rxq_idx;
 
+	rte_rcu_qsbr_thread_online(priv->dev_state_qsv, tid);
+
 	if (unlikely(priv->dev_state != MANA_DEV_ACTIVE)) {
 		/* Device reset occurred. */
+		rte_rcu_qsbr_thread_offline(priv->dev_state_qsv, tid);
 		return 0;
 	}
-
-	rte_rcu_qsbr_thread_online(priv->dev_state_qsv, tid);
 
 repoll:
 	/* Polling on new completions if we have no backlog */

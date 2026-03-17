@@ -1112,6 +1112,14 @@ mana_reset_enter(struct mana_priv *priv)
 		goto out;
 	}
 
+	for (int i = 0; i < priv->num_queues; i++) {
+		struct mana_rxq *rxq = dev->data->rx_queues[i];
+		struct mana_txq *txq = dev->data->tx_queues[i];
+
+		mana_mr_btree_free(&rxq->mr_btree);
+		mana_mr_btree_free(&txq->mr_btree);
+	}
+
 	DRV_LOG(DEBUG, "Reset processing exited successfully");
 
 	priv->dev_state = MANA_DEV_RESET_EXIT;
@@ -1187,13 +1195,31 @@ mana_reset_exit(struct mana_priv *priv)
 	/*
 	 * The priv of the rxq and txq are still pointing to the old one.
 	 * Make them pointing to the new priv.
+	 * Init the local MR caches.
 	 */
 	for (i = 0; i < new_priv->num_queues; i++) {
 		struct mana_rxq *rxq = dev->data->rx_queues[i];
 		struct mana_txq *txq = dev->data->tx_queues[i];
 
 		rxq->priv = new_priv;
+		ret = mana_mr_btree_init(&rxq->mr_btree,
+					 MANA_MR_BTREE_PER_QUEUE_N,
+					 rxq->socket);
+		if (ret) {
+			DRV_LOG(ERR, "Failed to init RXQ %d MR btree "
+				"on socket %u, ret %d", i, rxq->socket, ret);
+			goto out;
+		}
+
 		txq->priv = new_priv;
+		ret = mana_mr_btree_init(&txq->mr_btree,
+					 MANA_MR_BTREE_PER_QUEUE_N,
+					 txq->socket);
+		if (ret) {
+			DRV_LOG(ERR, "Failed to init TXQ %d MR btree "
+				"on socket %u, ret %d", i, rxq->socket, ret);
+			goto out;
+		}
 	}
 	DRV_LOG(DEBUG, "new_priv %p, num_queues %u",
 		new_priv, new_priv->num_queues);
