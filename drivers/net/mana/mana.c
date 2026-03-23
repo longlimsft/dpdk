@@ -40,6 +40,9 @@ static const char *MZ_MANA_SHARED_DATA = "mana_shared_data";
 /* Spinlock for mana_shared_data */
 static rte_spinlock_t mana_shared_data_lock = RTE_SPINLOCK_INITIALIZER;
 
+/* Spinlock for sychronizing mana reset and some mana_dev_ops callbacks */
+static rte_spinlock_t mana_reset_ops_lock = RTE_SPINLOCK_INITIALIZER;
+
 /* Allocate a buffer on the stack and fill it with a printf format string. */
 #define MANA_MKSTR(name, ...) \
 	int mkstr_size_##name = snprintf(NULL, 0, "" __VA_ARGS__); \
@@ -413,6 +416,20 @@ mana_dev_info_get(struct rte_eth_dev *dev,
 	return 0;
 }
 
+static int
+mana_dev_info_get_lock(struct rte_eth_dev *dev,
+		       struct rte_eth_dev_info *dev_info)
+{
+	int ret;
+	if (rte_spinlock_trylock(&mana_reset_ops_lock)) {
+		ret = mana_dev_info_get(dev, dev_info);
+		rte_spinlock_unlock(&mana_reset_ops_lock);
+	} else {
+		ret = -EBUSY;
+	}
+	return ret;
+}
+
 static void
 mana_dev_tx_queue_info(struct rte_eth_dev *dev, uint16_t queue_id,
 		       struct rte_eth_txq_info *qinfo)
@@ -574,6 +591,22 @@ fail:
 	return ret;
 }
 
+static int
+mana_dev_tx_queue_setup_lock(struct rte_eth_dev *dev, uint16_t queue_idx,
+			     uint16_t nb_desc, unsigned int socket_id,
+			     const struct rte_eth_txconf *tx_conf)
+{
+	int ret;
+	if (rte_spinlock_trylock(&mana_reset_ops_lock)) {
+		ret = mana_dev_tx_queue_setup(dev, queue_idx,
+					      nb_desc, socket_id, tx_conf);
+		rte_spinlock_unlock(&mana_reset_ops_lock);
+	} else {
+		ret = -EBUSY;
+	}
+	return ret;
+}
+
 static void
 mana_dev_tx_queue_release(struct rte_eth_dev *dev, uint16_t qid)
 {
@@ -648,6 +681,23 @@ fail:
 	rte_free(rxq->gdma_comp_buf);
 	rte_free(rxq->desc_ring);
 	rte_free(rxq);
+	return ret;
+}
+
+static int
+mana_dev_rx_queue_setup_lock(struct rte_eth_dev *dev, uint16_t queue_idx,
+			     uint16_t nb_desc, unsigned int socket_id,
+			     const struct rte_eth_rxconf *rx_conf __rte_unused,
+			     struct rte_mempool *mp)
+{
+	int ret;
+	if (rte_spinlock_trylock(&mana_reset_ops_lock)) {
+		ret = mana_dev_rx_queue_setup(dev, queue_idx, nb_desc,
+					      socket_id, rx_conf, mp);
+		rte_spinlock_unlock(&mana_reset_ops_lock);
+	} else {
+		ret = -EBUSY;
+	}
 	return ret;
 }
 
@@ -842,27 +892,106 @@ mana_mtu_set(struct rte_eth_dev *dev, uint16_t mtu)
 	return mana_ifreq(priv, SIOCSIFMTU, &request);
 }
 
+#define MANA_OPS_1_LOCK(_func)						\
+static int								\
+_func##_lock(struct rte_eth_dev *dev)					\
+{									\
+	int ret;							\
+	if (rte_spinlock_trylock(&mana_reset_ops_lock)) {		\
+		ret = _func(dev);					\
+		rte_spinlock_unlock(&mana_reset_ops_lock);		\
+	} else {							\
+		ret = -EBUSY;						\
+	}								\
+	return ret;							\
+}
+
+MANA_OPS_1_LOCK(mana_dev_configure)
+
+MANA_OPS_1_LOCK(mana_dev_start)
+
+MANA_OPS_1_LOCK(mana_dev_stop)
+
+MANA_OPS_1_LOCK(mana_dev_close)
+#undef MANA_OPS_1_LOCK
+
+#define MANA_OPS_2_LOCK(_func)						\
+static int								\
+_func##_lock(struct rte_eth_dev *dev,					\
+	       struct rte_eth_rss_conf *rss_conf)			\
+{									\
+	int ret;							\
+	if (rte_spinlock_trylock(&mana_reset_ops_lock)) {		\
+		ret = _func(dev, rss_conf);				\
+		rte_spinlock_unlock(&mana_reset_ops_lock);		\
+	} else {							\
+		ret = -EBUSY;						\
+	}								\
+	return ret;							\
+}
+
+MANA_OPS_2_LOCK(mana_rss_hash_update)
+
+MANA_OPS_2_LOCK(mana_rss_hash_conf_get)
+#undef MANA_OPS_2_LOCK
+
+#define MANA_OPS_3_LOCK(_func, _arg)					\
+static void								\
+_func##_lock(struct rte_eth_dev *dev, uint16_t _arg)			\
+{									\
+	if (rte_spinlock_trylock(&mana_reset_ops_lock)) {		\
+		_func(dev, _arg);					\
+		rte_spinlock_unlock(&mana_reset_ops_lock);		\
+	}								\
+}
+
+MANA_OPS_3_LOCK(mana_dev_tx_queue_release, qid)
+
+MANA_OPS_3_LOCK(mana_dev_rx_queue_release, qid)
+#undef MANA_OPS_3_LOCK
+
+#define MANA_OPS_4_LOCK(_func, _arg)					\
+static int								\
+_func##_lock(struct rte_eth_dev *dev, uint16_t _arg)			\
+{									\
+	int ret;							\
+	if (rte_spinlock_trylock(&mana_reset_ops_lock)) {		\
+		ret = _func(dev, _arg);					\
+		rte_spinlock_unlock(&mana_reset_ops_lock);		\
+	} else {							\
+		ret = -EBUSY;						\
+	}								\
+	return ret;							\
+}
+
+MANA_OPS_4_LOCK(mana_rx_intr_enable, rx_queue_id)
+
+MANA_OPS_4_LOCK(mana_rx_intr_disable, rx_queue_id)
+
+MANA_OPS_4_LOCK(mana_mtu_set, mtu)
+#undef MANA_OPS_4_LOCK
+
 static const struct eth_dev_ops mana_dev_ops = {
-	.dev_configure		= mana_dev_configure,
-	.dev_start		= mana_dev_start,
-	.dev_stop		= mana_dev_stop,
-	.dev_close		= mana_dev_close,
-	.dev_infos_get		= mana_dev_info_get,
+	.dev_configure		= mana_dev_configure_lock,
+	.dev_start		= mana_dev_start_lock,
+	.dev_stop		= mana_dev_stop_lock,
+	.dev_close		= mana_dev_close_lock,
+	.dev_infos_get		= mana_dev_info_get_lock,
 	.txq_info_get		= mana_dev_tx_queue_info,
 	.rxq_info_get		= mana_dev_rx_queue_info,
 	.dev_supported_ptypes_get = mana_supported_ptypes,
-	.rss_hash_update	= mana_rss_hash_update,
-	.rss_hash_conf_get	= mana_rss_hash_conf_get,
-	.tx_queue_setup		= mana_dev_tx_queue_setup,
-	.tx_queue_release	= mana_dev_tx_queue_release,
-	.rx_queue_setup		= mana_dev_rx_queue_setup,
-	.rx_queue_release	= mana_dev_rx_queue_release,
-	.rx_queue_intr_enable	= mana_rx_intr_enable,
-	.rx_queue_intr_disable	= mana_rx_intr_disable,
+	.rss_hash_update	= mana_rss_hash_update_lock,
+	.rss_hash_conf_get	= mana_rss_hash_conf_get_lock,
+	.tx_queue_setup		= mana_dev_tx_queue_setup_lock,
+	.tx_queue_release	= mana_dev_tx_queue_release_lock,
+	.rx_queue_setup		= mana_dev_rx_queue_setup_lock,
+	.rx_queue_release	= mana_dev_rx_queue_release_lock,
+	.rx_queue_intr_enable	= mana_rx_intr_enable_lock,
+	.rx_queue_intr_disable	= mana_rx_intr_disable_lock,
 	.link_update		= mana_dev_link_update,
 	.stats_get		= mana_dev_stats_get,
 	.stats_reset		= mana_dev_stats_reset,
-	.mtu_set		= mana_mtu_set,
+	.mtu_set		= mana_mtu_set_lock,
 };
 
 static const struct eth_dev_ops mana_dev_secondary_ops = {
@@ -1208,7 +1337,7 @@ mana_reset_exit(struct mana_priv *priv)
 		if (ret) {
 			DRV_LOG(ERR, "Failed to init RXQ %d MR btree "
 				"on socket %u, ret %d", i, rxq->socket, ret);
-			goto out;
+			goto mr_init_failed;
 		}
 
 		txq->priv = new_priv;
@@ -1217,8 +1346,8 @@ mana_reset_exit(struct mana_priv *priv)
 					 txq->socket);
 		if (ret) {
 			DRV_LOG(ERR, "Failed to init TXQ %d MR btree "
-				"on socket %u, ret %d", i, rxq->socket, ret);
-			goto out;
+				"on socket %u, ret %d", i, txq->socket, ret);
+			goto mr_init_failed;
 		}
 	}
 	DRV_LOG(DEBUG, "new_priv %p, num_queues %u",
@@ -1235,6 +1364,16 @@ mana_reset_exit(struct mana_priv *priv)
 	DRV_LOG(DEBUG, "Exiting the reset complete processing");
 
 out:
+	return;
+
+mr_init_failed:
+	for (int j = 0; j <= i; j++) {
+		struct mana_rxq *rxq = dev->data->rx_queues[j];
+		struct mana_txq *txq = dev->data->tx_queues[j];
+
+		mana_mr_btree_free(&rxq->mr_btree);
+		mana_mr_btree_free(&txq->mr_btree);
+	}
 	return;
 }
 
@@ -1266,9 +1405,10 @@ mana_intr_handler(void *arg)
 		case IBV_EVENT_PORT_ERR:
 			DRV_LOG(INFO, "Device reset event received");
 			if (priv->dev_state == MANA_DEV_ACTIVE) {
+				rte_spinlock_lock(&mana_reset_ops_lock);
 				mana_reset_enter(priv);
 			} else {
-				DRV_LOG(ERR, "Already in Event 135");
+				DRV_LOG(ERR, "Already in reset handling");
 			}
 			break;
 
@@ -1276,6 +1416,7 @@ mana_intr_handler(void *arg)
 			DRV_LOG(INFO, "Device reset Complete event received");
 			if (priv->dev_state == MANA_DEV_RESET_EXIT) {
 				mana_reset_exit(priv);
+				rte_spinlock_unlock(&mana_reset_ops_lock);
 			} else {
 				if (priv->dev_state == MANA_DEV_ACTIVE)
 					DRV_LOG(ERR, "Not in "
