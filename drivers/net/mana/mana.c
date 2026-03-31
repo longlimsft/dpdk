@@ -40,9 +40,6 @@ static const char *MZ_MANA_SHARED_DATA = "mana_shared_data";
 /* Spinlock for mana_shared_data */
 static rte_spinlock_t mana_shared_data_lock = RTE_SPINLOCK_INITIALIZER;
 
-/* Spinlock for sychronizing mana reset and some mana_dev_ops callbacks */
-static rte_spinlock_t mana_reset_ops_lock = RTE_SPINLOCK_INITIALIZER;
-
 /* Allocate a buffer on the stack and fill it with a printf format string. */
 #define MANA_MKSTR(name, ...) \
 	int mkstr_size_##name = snprintf(NULL, 0, "" __VA_ARGS__); \
@@ -420,10 +417,11 @@ static int
 mana_dev_info_get_lock(struct rte_eth_dev *dev,
 		       struct rte_eth_dev_info *dev_info)
 {
+	struct mana_priv *priv = dev->data->dev_private;
 	int ret;
-	if (rte_spinlock_trylock(&mana_reset_ops_lock)) {
+	if (rte_spinlock_trylock(&priv->reset_ops_lock)) {
 		ret = mana_dev_info_get(dev, dev_info);
-		rte_spinlock_unlock(&mana_reset_ops_lock);
+		rte_spinlock_unlock(&priv->reset_ops_lock);
 	} else {
 		ret = -EBUSY;
 	}
@@ -596,11 +594,12 @@ mana_dev_tx_queue_setup_lock(struct rte_eth_dev *dev, uint16_t queue_idx,
 			     uint16_t nb_desc, unsigned int socket_id,
 			     const struct rte_eth_txconf *tx_conf)
 {
+	struct mana_priv *priv = dev->data->dev_private;
 	int ret;
-	if (rte_spinlock_trylock(&mana_reset_ops_lock)) {
+	if (rte_spinlock_trylock(&priv->reset_ops_lock)) {
 		ret = mana_dev_tx_queue_setup(dev, queue_idx,
 					      nb_desc, socket_id, tx_conf);
-		rte_spinlock_unlock(&mana_reset_ops_lock);
+		rte_spinlock_unlock(&priv->reset_ops_lock);
 	} else {
 		ret = -EBUSY;
 	}
@@ -690,11 +689,12 @@ mana_dev_rx_queue_setup_lock(struct rte_eth_dev *dev, uint16_t queue_idx,
 			     const struct rte_eth_rxconf *rx_conf __rte_unused,
 			     struct rte_mempool *mp)
 {
+	struct mana_priv *priv = dev->data->dev_private;
 	int ret;
-	if (rte_spinlock_trylock(&mana_reset_ops_lock)) {
+	if (rte_spinlock_trylock(&priv->reset_ops_lock)) {
 		ret = mana_dev_rx_queue_setup(dev, queue_idx, nb_desc,
 					      socket_id, rx_conf, mp);
-		rte_spinlock_unlock(&mana_reset_ops_lock);
+		rte_spinlock_unlock(&priv->reset_ops_lock);
 	} else {
 		ret = -EBUSY;
 	}
@@ -896,10 +896,11 @@ mana_mtu_set(struct rte_eth_dev *dev, uint16_t mtu)
 static int								\
 _func##_lock(struct rte_eth_dev *dev)					\
 {									\
+	struct mana_priv *priv = dev->data->dev_private;		\
 	int ret;							\
-	if (rte_spinlock_trylock(&mana_reset_ops_lock)) {		\
+	if (rte_spinlock_trylock(&priv->reset_ops_lock)) {		\
 		ret = _func(dev);					\
-		rte_spinlock_unlock(&mana_reset_ops_lock);		\
+		rte_spinlock_unlock(&priv->reset_ops_lock);		\
 	} else {							\
 		ret = -EBUSY;						\
 	}								\
@@ -920,10 +921,11 @@ static int								\
 _func##_lock(struct rte_eth_dev *dev,					\
 	       struct rte_eth_rss_conf *rss_conf)			\
 {									\
+	struct mana_priv *priv = dev->data->dev_private;		\
 	int ret;							\
-	if (rte_spinlock_trylock(&mana_reset_ops_lock)) {		\
+	if (rte_spinlock_trylock(&priv->reset_ops_lock)) {		\
 		ret = _func(dev, rss_conf);				\
-		rte_spinlock_unlock(&mana_reset_ops_lock);		\
+		rte_spinlock_unlock(&priv->reset_ops_lock);		\
 	} else {							\
 		ret = -EBUSY;						\
 	}								\
@@ -939,9 +941,10 @@ MANA_OPS_2_LOCK(mana_rss_hash_conf_get)
 static void								\
 _func##_lock(struct rte_eth_dev *dev, uint16_t _arg)			\
 {									\
-	if (rte_spinlock_trylock(&mana_reset_ops_lock)) {		\
+	struct mana_priv *priv = dev->data->dev_private;		\
+	if (rte_spinlock_trylock(&priv->reset_ops_lock)) {		\
 		_func(dev, _arg);					\
-		rte_spinlock_unlock(&mana_reset_ops_lock);		\
+		rte_spinlock_unlock(&priv->reset_ops_lock);		\
 	}								\
 }
 
@@ -954,10 +957,11 @@ MANA_OPS_3_LOCK(mana_dev_rx_queue_release, qid)
 static int								\
 _func##_lock(struct rte_eth_dev *dev, uint16_t _arg)			\
 {									\
+	struct mana_priv *priv = dev->data->dev_private;		\
 	int ret;							\
-	if (rte_spinlock_trylock(&mana_reset_ops_lock)) {		\
+	if (rte_spinlock_trylock(&priv->reset_ops_lock)) {		\
 		ret = _func(dev, _arg);					\
-		rte_spinlock_unlock(&mana_reset_ops_lock);		\
+		rte_spinlock_unlock(&priv->reset_ops_lock);		\
 	} else {							\
 		ret = -EBUSY;						\
 	}								\
@@ -1318,6 +1322,8 @@ mana_reset_exit(struct mana_priv *priv)
 
 	/* Now getting the new priv structure and init some of its fields */
 	new_priv = dev->data->dev_private;
+	/* need to hold the lock */
+	rte_spinlock_lock(&new_priv->reset_ops_lock);
 	new_priv->dev_state = MANA_DEV_RESET_EXIT;
 	rte_wmb();
 
@@ -1361,6 +1367,8 @@ mana_reset_exit(struct mana_priv *priv)
 
 	rte_wmb();
 	new_priv->dev_state = MANA_DEV_ACTIVE;
+	/* Now we can release the lock in the new_priv */
+	rte_spinlock_unlock(&new_priv->reset_ops_lock);
 	DRV_LOG(DEBUG, "Exiting the reset complete processing");
 
 out:
@@ -1405,7 +1413,7 @@ mana_intr_handler(void *arg)
 		case IBV_EVENT_PORT_ERR:
 			DRV_LOG(INFO, "Device reset event received");
 			if (priv->dev_state == MANA_DEV_ACTIVE) {
-				rte_spinlock_lock(&mana_reset_ops_lock);
+				rte_spinlock_lock(&priv->reset_ops_lock);
 				mana_reset_enter(priv);
 			} else {
 				DRV_LOG(ERR, "Already in reset handling");
@@ -1416,7 +1424,7 @@ mana_intr_handler(void *arg)
 			DRV_LOG(INFO, "Device reset Complete event received");
 			if (priv->dev_state == MANA_DEV_RESET_EXIT) {
 				mana_reset_exit(priv);
-				rte_spinlock_unlock(&mana_reset_ops_lock);
+				rte_spinlock_unlock(&priv->reset_ops_lock);
 			} else {
 				if (priv->dev_state == MANA_DEV_ACTIVE)
 					DRV_LOG(ERR, "Not in "
@@ -1825,6 +1833,8 @@ mana_probe_port(struct ibv_device *ibdev, struct ibv_device_attr_ex *dev_attr,
 		DRV_LOG(ERR, "Init dev_state_qsv failed ret %d", ret);
 		goto failed;
 	}
+
+	rte_spinlock_init(&priv->reset_ops_lock);
 
 	/* Create async interrupt handler */
 	ret = mana_intr_install(eth_dev, priv);

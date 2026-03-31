@@ -382,6 +382,8 @@ struct mana_priv {
 	rte_spinlock_t	mr_btree_lock;
 	volatile enum mana_device_state dev_state;
 	struct rte_rcu_qsbr *dev_state_qsv;
+	/* lock for sychronizing mana reset and some mana_dev_ops callbacks */
+	rte_spinlock_t reset_ops_lock;
 };
 
 struct mana_txq_desc {
