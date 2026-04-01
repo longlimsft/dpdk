@@ -193,7 +193,8 @@ mana_tx_burst(void *dpdk_txq, struct rte_mbuf **tx_pkts, uint16_t nb_pkts)
 	void *db_page;
 	uint16_t pkt_sent = 0;
 	uint32_t num_comp, i;
-	unsigned int tid = priv->num_queues + txq->txq_idx;
+	unsigned int tid = (priv->port_id << 8)
+			    + priv->num_queues + txq->txq_idx;
 #ifdef RTE_ARCH_32
 	uint32_t wqe_count = 0;
 #endif
@@ -228,7 +229,8 @@ mana_tx_burst(void *dpdk_txq, struct rte_mbuf **tx_pkts, uint16_t nb_pkts)
 		}
 
 		if (!desc->pkt) {
-			DP_LOG(ERR, "mana_txq_desc has a NULL pkt");
+			DP_LOG(ERR, "mana_txq_desc has a NULL pkt, priv %p, "
+			       "txq = %d", priv, txq->txq_idx);
 		} else {
 			txq->stats.bytes += desc->pkt->pkt_len;
 			rte_pktmbuf_free(desc->pkt);

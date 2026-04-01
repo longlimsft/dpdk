@@ -451,7 +451,7 @@ mana_rx_burst(void *dpdk_rxq, struct rte_mbuf **pkts, uint16_t pkts_n)
 	uint32_t pkt_len;
 	uint32_t i;
 	int polled = 0;
-	unsigned int tid = rxq->rxq_idx;
+	unsigned int tid = (priv->port_id << 8) + rxq->rxq_idx;
 
 	rte_rcu_qsbr_thread_online(priv->dev_state_qsv, tid);
 
