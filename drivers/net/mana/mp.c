@@ -6,6 +6,7 @@
 #include <ethdev_driver.h>
 #include <rte_log.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 #include <infiniband/verbs.h>
 
@@ -120,6 +121,59 @@ mana_mp_primary_handle(const struct rte_mp_msg *mp_msg, const void *peer)
 }
 
 static int
+mana_mp_reset_enter(struct rte_eth_dev *dev)
+{
+	struct mana_process_priv *proc_priv = dev->process_private;
+
+	/* Reset the db_page to NULL */
+	proc_priv->db_page = (void *)0;
+
+	DRV_LOG(DEBUG, "All secondary threads are quiescent");
+	return 0;
+}
+
+static uint32_t
+mana_mp_reset_exit(void *arg)
+{
+	struct rte_eth_dev *dev = (struct rte_eth_dev *)arg;
+	struct mana_process_priv *proc_priv = dev->process_private;
+	int ret = 0;
+	int fd;
+
+	if (proc_priv->db_page != 0) {
+		/* Doorbell already mapped. Nothing to do */
+		DRV_LOG(DEBUG, "Secondary doorbell already mapped to %p",
+			proc_priv->db_page);
+		goto out;
+	}
+
+	/* Get the new IB FD from the primary process */
+	fd = mana_mp_req_verbs_cmd_fd(dev);
+	if (fd < 0) {
+		DRV_LOG(ERR, "Failed to get FD %d", fd);
+		ret = -ENODEV;
+		goto out;
+	}
+
+	ret = mana_map_doorbell_secondary(dev, fd);
+	if (ret) {
+		DRV_LOG(ERR, "Failed secondary doorbell map %d", fd);
+		ret = -ENODEV;
+		goto out;
+	}
+
+	/* fd is no not used after mapping doorbell */
+	close(fd);
+
+out:
+	if (ret) {
+		DRV_LOG(ERR,
+			"Secondary tx will NOT recover from device reset");
+	}
+	return ret;
+}
+
+static int
 mana_mp_secondary_handle(const struct rte_mp_msg *mp_msg, const void *peer)
 {
 	struct rte_mp_msg mp_res = { 0 };
@@ -168,6 +222,29 @@ mana_mp_secondary_handle(const struct rte_mp_msg *mp_msg, const void *peer)
 		rte_mb();
 
 		res->result = 0;
+		ret = rte_mp_reply(&mp_res, peer);
+		break;
+
+	case MANA_MP_REQ_RESET_ENTER:
+		DRV_LOG(INFO, "Port %u reset enter", dev->data->port_id);
+		res->result = mana_mp_reset_enter(dev);
+
+		ret = rte_mp_reply(&mp_res, peer);
+		break;
+
+	case MANA_MP_REQ_RESET_EXIT:
+		DRV_LOG(INFO, "Port %u reset exit", dev->data->port_id);
+		rte_thread_t tid;
+
+		ret = rte_thread_create_control(&tid, "Secondary reset exit",
+						mana_mp_reset_exit, dev);
+		if (ret) {
+			DRV_LOG(ERR, "Failed to create thread for handling "
+				"reset exit, ret %d ", ret);
+			res->result = ret;
+		} else {
+			res->result = 0;
+		}
 		ret = rte_mp_reply(&mp_res, peer);
 		break;
 
@@ -298,7 +375,7 @@ mana_mp_req_mr_create(struct mana_priv *priv, uintptr_t addr, uint32_t len)
 	return ret;
 }
 
-void
+int
 mana_mp_req_on_rxtx(struct rte_eth_dev *dev, enum mana_mp_req_type type)
 {
 	struct rte_mp_msg mp_req = { 0 };
@@ -306,16 +383,17 @@ mana_mp_req_on_rxtx(struct rte_eth_dev *dev, enum mana_mp_req_type type)
 	struct rte_mp_reply mp_rep;
 	struct mana_mp_param *res;
 	struct timespec ts = {.tv_sec = MANA_MP_REQ_TIMEOUT_SEC, .tv_nsec = 0};
-	int i, ret;
+	int i, ret = 0;
 
-	if (type != MANA_MP_REQ_START_RXTX && type != MANA_MP_REQ_STOP_RXTX) {
+	if (type != MANA_MP_REQ_START_RXTX && type != MANA_MP_REQ_STOP_RXTX &&
+	    type != MANA_MP_REQ_RESET_ENTER && type != MANA_MP_REQ_RESET_EXIT) {
 		DRV_LOG(ERR, "port %u unknown request (req_type %d)",
 			dev->data->port_id, type);
-		return;
+		return -EINVAL;
 	}
 
 	if (rte_atomic_load_explicit(&mana_shared_data->secondary_cnt, rte_memory_order_relaxed) == 0)
-		return;
+		return 0;
 
 	mp_init_msg(&mp_req, type, dev->data->port_id);
 
@@ -329,6 +407,7 @@ mana_mp_req_on_rxtx(struct rte_eth_dev *dev, enum mana_mp_req_type type)
 	if (mp_rep.nb_sent != mp_rep.nb_received) {
 		DRV_LOG(ERR, "port %u not all secondaries responded (%d)",
 			dev->data->port_id, type);
+		ret = -ETIMEDOUT;
 		goto exit;
 	}
 	for (i = 0; i < mp_rep.nb_received; i++) {
@@ -337,9 +416,11 @@ mana_mp_req_on_rxtx(struct rte_eth_dev *dev, enum mana_mp_req_type type)
 		if (res->result) {
 			DRV_LOG(ERR, "port %u request failed on secondary %d",
 				dev->data->port_id, i);
+			ret = res->result;
 			goto exit;
 		}
 	}
 exit:
 	free(mp_rep.msgs);
+	return ret;
 }

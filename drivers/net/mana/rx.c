@@ -255,6 +255,7 @@ mana_start_rx_queues(struct rte_eth_dev *dev)
 		struct ibv_wq_init_attr wq_attr = {};
 
 		rxq->rxq_idx = i;
+		DRV_LOG(DEBUG, "assigning rxq_idx to %d", i);
 
 		manadv_set_context_attr(priv->ib_ctx,
 			MANADV_CTX_ATTR_BUF_ALLOCATORS,
@@ -451,13 +452,14 @@ mana_rx_burst(void *dpdk_rxq, struct rte_mbuf **pkts, uint16_t pkts_n)
 	uint32_t pkt_len;
 	uint32_t i;
 	int polled = 0;
-	unsigned int tid = (priv->port_id << 8) + rxq->rxq_idx;
+	struct rte_rcu_qsbr *dstate_qsv = priv->dev_state_qsv;
+	unsigned int tid = rxq->rxq_idx;
 
-	rte_rcu_qsbr_thread_online(priv->dev_state_qsv, tid);
+	rte_rcu_qsbr_thread_online(dstate_qsv, tid);
 
 	if (unlikely(priv->dev_state != MANA_DEV_ACTIVE)) {
 		/* Device reset occurred. */
-		rte_rcu_qsbr_thread_offline(priv->dev_state_qsv, tid);
+		rte_rcu_qsbr_thread_offline(dstate_qsv, tid);
 		return 0;
 	}
 
@@ -600,7 +602,7 @@ drop:
 				wqe_consumed, ret);
 	}
 
-	rte_rcu_qsbr_thread_offline(priv->dev_state_qsv, tid);
+	rte_rcu_qsbr_thread_offline(dstate_qsv, tid);
 
 	return pkt_received;
 }

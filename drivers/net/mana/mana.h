@@ -347,6 +347,8 @@ enum mana_device_state {
 	 * Waiting for reset exit or in reset exit processing
 	 */
 	MANA_DEV_RESET_EXIT	= 2,
+	/* Reset failed */
+	MANA_DEV_RESET_FAILED	= 3,
 };
 
 struct mana_priv {
@@ -561,6 +563,8 @@ enum mana_mp_req_type {
 	MANA_MP_REQ_CREATE_MR,
 	MANA_MP_REQ_START_RXTX,
 	MANA_MP_REQ_STOP_RXTX,
+	MANA_MP_REQ_RESET_ENTER,
+	MANA_MP_REQ_RESET_EXIT,
 };
 
 /* Pameters for IPC. */
@@ -581,8 +585,9 @@ void mana_mp_uninit_primary(void);
 void mana_mp_uninit_secondary(void);
 int mana_mp_req_verbs_cmd_fd(struct rte_eth_dev *dev);
 int mana_mp_req_mr_create(struct mana_priv *priv, uintptr_t addr, uint32_t len);
+int mana_map_doorbell_secondary(struct rte_eth_dev *eth_dev, int fd);
 
-void mana_mp_req_on_rxtx(struct rte_eth_dev *dev, enum mana_mp_req_type type);
+int mana_mp_req_on_rxtx(struct rte_eth_dev *dev, enum mana_mp_req_type type);
 
 void *mana_alloc_verbs_buf(size_t size, void *data);
 void mana_free_verbs_buf(void *ptr, void *data __rte_unused);

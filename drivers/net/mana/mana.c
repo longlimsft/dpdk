@@ -111,8 +111,7 @@ mana_dev_configure(struct rte_eth_dev *dev)
 	 * Now we know the total number of rx and tx queues.
 	 * Register the rcu qsv thread.
 	 */
-	for (unsigned int i = (priv->port_id << 8);
-	     i < (priv->port_id << 8) + (unsigned int)(2 * priv->num_queues); i++) {
+	for (unsigned int i = 0; i < (unsigned int)(2 * priv->num_queues); i++) {
 		if (rte_rcu_qsbr_thread_register(priv->dev_state_qsv, i) != 0) {
 			DRV_LOG(ERR, "Failed to register rcu qsv thread "
 				"%d of total %d", i, 2 * priv->num_queues - 1);
@@ -238,12 +237,14 @@ mana_dev_start(struct rte_eth_dev *dev)
 	DRV_LOG(INFO, "TX/RX queues have started");
 
 	/* Enable datapath for secondary processes */
-	mana_mp_req_on_rxtx(dev, MANA_MP_REQ_START_RXTX);
+	(void) mana_mp_req_on_rxtx(dev, MANA_MP_REQ_START_RXTX);
 
-	ret = rxq_intr_enable(priv);
-	if (ret) {
-		DRV_LOG(ERR, "Failed to enable RX interrupts");
-		goto failed_intr;
+	if (priv->dev_state == MANA_DEV_ACTIVE) {
+		ret = rxq_intr_enable(priv);
+		if (ret) {
+			DRV_LOG(ERR, "Failed to enable RX interrupts");
+			goto failed_intr;
+		}
 	}
 
 	return 0;
@@ -266,7 +267,8 @@ mana_dev_stop(struct rte_eth_dev *dev)
 	int ret;
 	struct mana_priv *priv = dev->data->dev_private;
 
-	if (priv->dev_state == MANA_DEV_ACTIVE) {
+	if (priv->dev_state == MANA_DEV_ACTIVE ||
+	    priv->dev_state == MANA_DEV_RESET_FAILED) {
 		rxq_intr_disable(priv);
 		DRV_LOG(DEBUG, "rxq_intr_disable called");
 	}
@@ -275,7 +277,7 @@ mana_dev_stop(struct rte_eth_dev *dev)
 	dev->rx_pkt_burst = mana_rx_burst_removed;
 
 	/* Stop datapath on secondary processes */
-	mana_mp_req_on_rxtx(dev, MANA_MP_REQ_STOP_RXTX);
+	(void) mana_mp_req_on_rxtx(dev, MANA_MP_REQ_STOP_RXTX);
 
 	rte_wmb();
 
@@ -305,7 +307,8 @@ mana_dev_close(struct rte_eth_dev *dev)
 	DRV_LOG(DEBUG, "Free MR for priv %p", priv);
 	mana_remove_all_mr(priv);
 
-	if (priv->dev_state == MANA_DEV_ACTIVE) {
+	if (priv->dev_state == MANA_DEV_ACTIVE ||
+	    priv->dev_state == MANA_DEV_RESET_FAILED) {
 		ret = mana_intr_uninstall(priv);
 		if (ret)
 			return ret;
@@ -328,7 +331,8 @@ mana_dev_close(struct rte_eth_dev *dev)
 		priv->ib_pd = NULL;
 	}
 
-	if (priv->dev_state == MANA_DEV_ACTIVE) {
+	if (priv->dev_state == MANA_DEV_ACTIVE ||
+	    priv->dev_state == MANA_DEV_RESET_FAILED) {
 		ret = ibv_close_device(priv->ib_ctx);
 		if (ret) {
 			ret = errno;
@@ -1013,7 +1017,7 @@ static const struct eth_dev_ops mana_dev_ops = {
 static const struct eth_dev_ops mana_dev_secondary_ops = {
 	.stats_get = mana_dev_stats_get,
 	.stats_reset = mana_dev_stats_reset,
-	.dev_infos_get = mana_dev_info_get,
+	.dev_infos_get = mana_dev_info_get_lock,
 };
 
 uint16_t
@@ -1215,6 +1219,17 @@ mana_reset_enter(struct mana_priv *priv)
 	DRV_LOG(DEBUG, "Entering into device reset state");
 	DRV_LOG(DEBUG, "Resetting dev = %p, priv = %p", dev, priv);
 
+	/* Stop secondaries */
+	ret = mana_mp_req_on_rxtx(dev, MANA_MP_REQ_RESET_ENTER);
+	if (ret) {
+		DRV_LOG(ERR, "Failed to stop secondary processes ret = %d",
+			ret);
+		priv->dev_state = MANA_DEV_ACTIVE;
+		goto reset_failed;
+	}
+
+	DRV_LOG(DEBUG, "All secondary processes stopped");
+
 	ticket = rte_rcu_qsbr_start(priv->dev_state_qsv);
 
 	while (rte_rcu_qsbr_check(priv->dev_state_qsv, ticket, false) == 0) {
@@ -1222,15 +1237,18 @@ mana_reset_enter(struct mana_priv *priv)
 	}
 
 	DRV_LOG(DEBUG, "All threads are quiescent");
+
 	ret = mana_dev_stop(dev);
 	if (ret) {
 		DRV_LOG(ERR, "Failed to stop mana dev ret %d", ret);
-		goto dev_start_failed;
+		priv->dev_state = MANA_DEV_ACTIVE;
+		goto reset_failed;
 	}
 
 	ret = mana_dev_close(dev);
 	if (ret) {
 		DRV_LOG(ERR, "Failed to close mana dev ret %d", ret);
+		priv->dev_state = MANA_DEV_RESET_FAILED;
 		goto dev_close_failed;
 	}
 
@@ -1256,12 +1274,11 @@ dev_close_failed:
 	ret = mana_dev_start(dev);
 	if (ret) {
 		DRV_LOG(ERR, "Failed to re-start mana dev ret %d", ret);
+		priv->dev_state = MANA_DEV_RESET_FAILED;
 	}
 
-dev_start_failed:
-	priv->dev_state = MANA_DEV_ACTIVE;
+reset_failed:
 	rte_spinlock_unlock(&priv->reset_ops_lock);
-
 	return;
 }
 
@@ -1286,12 +1303,14 @@ mana_reset_exit(struct mana_priv *priv)
 	ret = ibv_close_device(priv->ib_ctx);
 	if (ret) {
 		DRV_LOG(ERR, "Failed to close ibv device %d", ret);
+		priv->dev_state = MANA_DEV_RESET_FAILED;
 		goto out;
 	}
 
 	ret = mana_pci_probe(NULL, pci_dev);
 	if (ret) {
 		DRV_LOG(ERR, "Failed to probe mana pci dev ret %d", ret);
+		priv->dev_state = MANA_DEV_RESET_FAILED;
 		goto out;
 	}
 
@@ -1322,6 +1341,14 @@ mana_reset_exit(struct mana_priv *priv)
 	}
 	DRV_LOG(DEBUG, "priv %p, num_queues %u", priv, priv->num_queues);
 
+	/* Start secondaries */
+	ret = mana_mp_req_on_rxtx(dev, MANA_MP_REQ_RESET_EXIT);
+	if (ret) {
+		DRV_LOG(ERR, "Failed to start secondary processes ret = %d",
+			ret);
+		goto mr_init_failed;
+	}
+
 	ret = mana_dev_start(dev);
 	if (ret) {
 		DRV_LOG(ERR, "Failed to start mana dev ret %d", ret);
@@ -1345,6 +1372,7 @@ mr_init_failed:
 		mana_mr_btree_free(&rxq->mr_btree);
 		mana_mr_btree_free(&txq->mr_btree);
 	}
+	priv->dev_state = MANA_DEV_RESET_FAILED;
 	return;
 }
 
@@ -1503,7 +1531,7 @@ mana_proc_priv_init(struct rte_eth_dev *dev)
 /*
  * Map the doorbell page for the secondary process through IB device handle.
  */
-static int
+int
 mana_map_doorbell_secondary(struct rte_eth_dev *eth_dev, int fd)
 {
 	struct mana_process_priv *priv = eth_dev->process_private;
@@ -1675,6 +1703,7 @@ mana_probe_port(struct ibv_device *ibdev, struct ibv_device_attr_ex *dev_attr,
 
 		eth_dev->device = &pci_dev->device;
 		eth_dev->dev_ops = &mana_dev_secondary_ops;
+
 		ret = mana_proc_priv_init(eth_dev);
 		if (ret)
 			goto failed;

@@ -85,6 +85,7 @@ mana_start_tx_queues(struct rte_eth_dev *dev)
 		txq = dev->data->tx_queues[i];
 
 		txq->txq_idx = i;
+		DRV_LOG(DEBUG, "assigning txq_idx to %d", txq->txq_idx);
 
 		manadv_set_context_attr(priv->ib_ctx,
 			MANADV_CTX_ATTR_BUF_ALLOCATORS,
@@ -193,17 +194,26 @@ mana_tx_burst(void *dpdk_txq, struct rte_mbuf **tx_pkts, uint16_t nb_pkts)
 	void *db_page;
 	uint16_t pkt_sent = 0;
 	uint32_t num_comp, i;
-	unsigned int tid = (priv->port_id << 8)
-			    + priv->num_queues + txq->txq_idx;
+	unsigned int tid = priv->num_queues + txq->txq_idx;
+	struct rte_rcu_qsbr *dstate_qsv = priv->dev_state_qsv;
 #ifdef RTE_ARCH_32
 	uint32_t wqe_count = 0;
 #endif
 
-	rte_rcu_qsbr_thread_online(priv->dev_state_qsv, tid);
+	db_page = priv->db_page;
+	if (rte_eal_process_type() == RTE_PROC_SECONDARY) {
+		struct rte_eth_dev *dev =
+			&rte_eth_devices[priv->dev_data->port_id];
+		struct mana_process_priv *process_priv = dev->process_private;
 
-	if (unlikely(priv->dev_state != MANA_DEV_ACTIVE)) {
+		db_page = process_priv->db_page;
+	}
+
+	rte_rcu_qsbr_thread_online(dstate_qsv, tid);
+
+	if (unlikely(priv->dev_state != MANA_DEV_ACTIVE || !db_page)) {
 		/* Device reset event occurred. */
-		rte_rcu_qsbr_thread_offline(priv->dev_state_qsv, tid);
+		rte_rcu_qsbr_thread_offline(dstate_qsv, tid);
 		return 0;
 	}
 
@@ -488,15 +498,6 @@ mana_tx_burst(void *dpdk_txq, struct rte_mbuf **tx_pkts, uint16_t nb_pkts)
 	}
 
 	/* Ring hardware door bell */
-	db_page = priv->db_page;
-	if (rte_eal_process_type() == RTE_PROC_SECONDARY) {
-		struct rte_eth_dev *dev =
-			&rte_eth_devices[priv->dev_data->port_id];
-		struct mana_process_priv *process_priv = dev->process_private;
-
-		db_page = process_priv->db_page;
-	}
-
 	if (pkt_sent) {
 #ifdef RTE_ARCH_32
 		ret = mana_ring_short_doorbell(db_page, GDMA_QUEUE_SEND,
@@ -515,7 +516,7 @@ mana_tx_burst(void *dpdk_txq, struct rte_mbuf **tx_pkts, uint16_t nb_pkts)
 			DP_LOG(ERR, "mana_ring_doorbell failed ret %d", ret);
 	}
 
-	rte_rcu_qsbr_thread_offline(priv->dev_state_qsv, tid);
+	rte_rcu_qsbr_thread_offline(dstate_qsv, tid);
 
 	return pkt_sent;
 }
