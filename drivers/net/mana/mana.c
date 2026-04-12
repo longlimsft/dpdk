@@ -239,12 +239,10 @@ mana_dev_start(struct rte_eth_dev *dev)
 	/* Enable datapath for secondary processes */
 	(void) mana_mp_req_on_rxtx(dev, MANA_MP_REQ_START_RXTX);
 
-	if (priv->dev_state == MANA_DEV_ACTIVE) {
-		ret = rxq_intr_enable(priv);
-		if (ret) {
-			DRV_LOG(ERR, "Failed to enable RX interrupts");
-			goto failed_intr;
-		}
+	ret = rxq_intr_enable(priv);
+	if (ret) {
+		DRV_LOG(ERR, "Failed to enable RX interrupts");
+		goto failed_intr;
 	}
 
 	return 0;
@@ -1219,6 +1217,12 @@ mana_reset_enter(struct mana_priv *priv)
 	DRV_LOG(DEBUG, "Entering into device reset state");
 	DRV_LOG(DEBUG, "Resetting dev = %p, priv = %p", dev, priv);
 
+	ticket = rte_rcu_qsbr_start(priv->dev_state_qsv);
+
+	while (rte_rcu_qsbr_check(priv->dev_state_qsv, ticket, false) == 0) {
+		rte_pause();
+	}
+
 	/* Stop secondaries */
 	ret = mana_mp_req_on_rxtx(dev, MANA_MP_REQ_RESET_ENTER);
 	if (ret) {
@@ -1226,14 +1230,6 @@ mana_reset_enter(struct mana_priv *priv)
 			ret);
 		priv->dev_state = MANA_DEV_ACTIVE;
 		goto reset_failed;
-	}
-
-	DRV_LOG(DEBUG, "All secondary processes stopped");
-
-	ticket = rte_rcu_qsbr_start(priv->dev_state_qsv);
-
-	while (rte_rcu_qsbr_check(priv->dev_state_qsv, ticket, false) == 0) {
-		rte_pause();
 	}
 
 	DRV_LOG(DEBUG, "All threads are quiescent");
@@ -1282,18 +1278,20 @@ reset_failed:
 	return;
 }
 
-static void
-mana_reset_exit(struct mana_priv *priv)
+static uint32_t
+mana_reset_exit_delay(void *arg)
 {
-	int i, ret;
+	struct mana_priv *priv = (struct mana_priv *)arg;
+	uint32_t ret = 0;
+	int i;
 	struct rte_eth_dev *dev;
 	struct rte_pci_device *pci_dev;
 
-	if (!priv) {
-		DRV_LOG(ERR, "Private structure invalid");
+	DRV_LOG(DEBUG, "Delayed mana device reset complete processing");
+	if (priv->dev_state != MANA_DEV_RESET_EXIT) {
+		DRV_LOG(ERR, "Wrong device state %d, exiting", priv->dev_state);
 		goto out;
 	}
-	DRV_LOG(DEBUG, "Entering into device reset complete processing");
 
 	dev = &rte_eth_devices[priv->port_id];
 	pci_dev = RTE_ETH_DEV_TO_PCI(dev);
@@ -1362,7 +1360,8 @@ mana_reset_exit(struct mana_priv *priv)
 	DRV_LOG(DEBUG, "Exiting the reset complete processing");
 
 out:
-	return;
+	rte_spinlock_unlock(&priv->reset_ops_lock);
+	return ret;
 
 mr_init_failed:
 	for (int j = 0; j <= i; j++) {
@@ -1373,6 +1372,70 @@ mr_init_failed:
 		mana_mr_btree_free(&txq->mr_btree);
 	}
 	priv->dev_state = MANA_DEV_RESET_FAILED;
+
+	rte_spinlock_unlock(&priv->reset_ops_lock);
+	return ret;
+}
+
+static void
+mana_intr_handle_cleanup(struct rte_intr_handle *intr_handle __rte_unused,
+			 void *arg)
+{
+	struct mana_priv *priv = (struct mana_priv *)arg;
+	rte_thread_t tid;
+	int ret;
+
+	DRV_LOG(DEBUG, "Interrupt handle cleanup called, priv = %p",
+		priv);
+	DRV_LOG(DEBUG, "Free intr_handle");
+	rte_intr_instance_free(priv->intr_handle);
+
+	ret = rte_thread_create_control(&tid, "Mana reset exit delay",
+					mana_reset_exit_delay, priv);
+	if (ret) {
+		DRV_LOG(ERR, "Failed to create thread for handling "
+			"delayed reset exit processing, ret %d", ret);
+		priv->dev_state = MANA_DEV_RESET_FAILED;
+		rte_spinlock_unlock(&priv->reset_ops_lock);
+	} else {
+		rte_thread_detach(tid);
+	}
+
+	return;
+}
+
+static void
+mana_reset_exit(struct mana_priv *priv)
+{
+	int ret;
+
+	if (!priv) {
+		DRV_LOG(ERR, "Private structure invalid");
+		return;
+	}
+	DRV_LOG(DEBUG, "Entering into device reset complete processing");
+
+	rxq_intr_disable(priv);
+
+	/* Uninstall the interrupt handler as no longer needed */
+	ret = rte_intr_callback_unregister_pending(priv->intr_handle,
+						   mana_intr_handler, priv,
+						   mana_intr_handle_cleanup);
+	if (ret < 0) {
+		DRV_LOG(ERR, "Failed to unregister intr_handle ret %d",
+			ret);
+		priv->dev_state = MANA_DEV_RESET_FAILED;
+		goto failed;
+	} else {
+		DRV_LOG(DEBUG,
+			"%d intr callback marked for removal", ret);
+		DRV_LOG(DEBUG, "mana_reset_exit_delay scheduled");
+	}
+
+	return;
+
+failed:
+	rte_spinlock_unlock(&priv->reset_ops_lock);
 	return;
 }
 
@@ -1385,7 +1448,7 @@ mana_intr_handler(void *arg)
 {
 	struct mana_priv *priv = arg;
 	struct ibv_context *ctx = priv->ib_ctx;
-	struct ibv_async_event event;
+	struct ibv_async_event event = { 0 };
 	struct rte_eth_dev *dev;
 
 	/* Read and ack all messages from IB device */
@@ -1415,7 +1478,6 @@ mana_intr_handler(void *arg)
 			DRV_LOG(INFO, "Device reset Complete event received");
 			if (priv->dev_state == MANA_DEV_RESET_EXIT) {
 				mana_reset_exit(priv);
-				rte_spinlock_unlock(&priv->reset_ops_lock);
 			} else {
 				if (priv->dev_state == MANA_DEV_ACTIVE)
 					DRV_LOG(ERR, "Not in "
@@ -1806,6 +1868,7 @@ mana_probe_port(struct ibv_device *ibdev, struct ibv_device_attr_ex *dev_attr,
 				      eth_dev->data->mac_addrs);
 		DRV_LOG(DEBUG, "Found existing eth_dev %p with mac addr %s",
 			eth_dev, address);
+		DRV_LOG(DEBUG, "ib_ctx = %p", priv->ib_ctx);
 		goto out;
 	}
 
@@ -1838,6 +1901,13 @@ mana_probe_port(struct ibv_device *ibdev, struct ibv_device_attr_ex *dev_attr,
 
 	rte_spinlock_init(&priv->reset_ops_lock);
 
+	eth_dev->device = &pci_dev->device;
+
+	eth_dev->rx_pkt_burst = mana_rx_burst_removed;
+	eth_dev->tx_pkt_burst = mana_tx_burst_removed;
+	eth_dev->dev_ops = &mana_dev_ops;
+
+out:
 	/* Create async interrupt handler */
 	ret = mana_intr_install(eth_dev, priv);
 	if (ret) {
@@ -1847,13 +1917,6 @@ mana_probe_port(struct ibv_device *ibdev, struct ibv_device_attr_ex *dev_attr,
 		DRV_LOG(INFO, "mana_intr_install succeeded");
 	}
 
-	eth_dev->device = &pci_dev->device;
-
-	eth_dev->rx_pkt_burst = mana_rx_burst_removed;
-	eth_dev->tx_pkt_burst = mana_tx_burst_removed;
-	eth_dev->dev_ops = &mana_dev_ops;
-
-out:
 	DRV_LOG(INFO, "device %s priv %p dev port %d at port %u",
 		name, priv, priv->dev_port, eth_dev->data->port_id);
 

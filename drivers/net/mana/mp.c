@@ -151,14 +151,14 @@ mana_mp_reset_exit(void *arg)
 	fd = mana_mp_req_verbs_cmd_fd(dev);
 	if (fd < 0) {
 		DRV_LOG(ERR, "Failed to get FD %d", fd);
-		ret = -ENODEV;
+		ret = ENODEV;
 		goto out;
 	}
 
 	ret = mana_map_doorbell_secondary(dev, fd);
 	if (ret) {
 		DRV_LOG(ERR, "Failed secondary doorbell map %d", fd);
-		ret = -ENODEV;
+		ret = ENODEV;
 		goto out;
 	}
 
@@ -236,6 +236,11 @@ mana_mp_secondary_handle(const struct rte_mp_msg *mp_msg, const void *peer)
 		DRV_LOG(INFO, "Port %u reset exit", dev->data->port_id);
 		rte_thread_t tid;
 
+		/*
+		 * Schedule a thread requesting primary to map doorbell
+		 * page. The thread uses the same IPC mechanism. So, it can
+		 * complete only after this parent thread exited.
+		 */
 		ret = rte_thread_create_control(&tid, "Secondary reset exit",
 						mana_mp_reset_exit, dev);
 		if (ret) {
@@ -243,6 +248,7 @@ mana_mp_secondary_handle(const struct rte_mp_msg *mp_msg, const void *peer)
 				"reset exit, ret %d ", ret);
 			res->result = ret;
 		} else {
+			rte_thread_detach(tid);
 			res->result = 0;
 		}
 		ret = rte_mp_reply(&mp_res, peer);
