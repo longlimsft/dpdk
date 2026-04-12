@@ -115,6 +115,7 @@ mana_dev_configure(struct rte_eth_dev *dev)
 		if (rte_rcu_qsbr_thread_register(priv->dev_state_qsv, i) != 0) {
 			DRV_LOG(ERR, "Failed to register rcu qsv thread "
 				"%d of total %d", i, 2 * priv->num_queues - 1);
+			return -EINVAL;
 		} else {
 			DRV_LOG(DEBUG,
 				"Register thread 0x%x for priv %p, port %u",
@@ -959,6 +960,9 @@ _func##_lock(struct rte_eth_dev *dev, uint16_t _arg)			\
 	if (rte_spinlock_trylock(&priv->reset_ops_lock)) {		\
 		_func(dev, _arg);					\
 		rte_spinlock_unlock(&priv->reset_ops_lock);		\
+	} else {							\
+		DRV_LOG(ERR, "Device reset in progress, "		\
+			"%s not called", #_func);			\
 	}								\
 }
 
@@ -1228,7 +1232,7 @@ mana_reset_enter(struct mana_priv *priv)
 	if (ret) {
 		DRV_LOG(ERR, "Failed to stop secondary processes ret = %d",
 			ret);
-		priv->dev_state = MANA_DEV_ACTIVE;
+		priv->dev_state = MANA_DEV_RESET_FAILED;
 		goto reset_failed;
 	}
 
@@ -1237,7 +1241,7 @@ mana_reset_enter(struct mana_priv *priv)
 	ret = mana_dev_stop(dev);
 	if (ret) {
 		DRV_LOG(ERR, "Failed to stop mana dev ret %d", ret);
-		priv->dev_state = MANA_DEV_ACTIVE;
+		priv->dev_state = MANA_DEV_RESET_FAILED;
 		goto reset_failed;
 	}
 
@@ -1350,7 +1354,7 @@ mana_reset_exit_delay(void *arg)
 	ret = mana_dev_start(dev);
 	if (ret) {
 		DRV_LOG(ERR, "Failed to start mana dev ret %d", ret);
-		/* Passthrough. Still change the device state */
+		goto mr_init_failed;
 	}
 
 	rte_wmb();
@@ -1389,6 +1393,7 @@ mana_intr_handle_cleanup(struct rte_intr_handle *intr_handle __rte_unused,
 		priv);
 	DRV_LOG(DEBUG, "Free intr_handle");
 	rte_intr_instance_free(priv->intr_handle);
+	priv->intr_handle = NULL;
 
 	ret = rte_thread_create_control(&tid, "Mana reset exit delay",
 					mana_reset_exit_delay, priv);
@@ -1421,15 +1426,17 @@ mana_reset_exit(struct mana_priv *priv)
 	ret = rte_intr_callback_unregister_pending(priv->intr_handle,
 						   mana_intr_handler, priv,
 						   mana_intr_handle_cleanup);
-	if (ret < 0) {
-		DRV_LOG(ERR, "Failed to unregister intr_handle ret %d",
+	if (ret <= 0) {
+		DRV_LOG(ERR, "Failed to unregister intr_handler ret %d",
 			ret);
+		if (ret == 0)
+			DRV_LOG(ERR, "No intr_handler found");
+
 		priv->dev_state = MANA_DEV_RESET_FAILED;
 		goto failed;
 	} else {
 		DRV_LOG(DEBUG,
 			"%d intr callback marked for removal", ret);
-		DRV_LOG(DEBUG, "mana_reset_exit_delay scheduled");
 	}
 
 	return;
@@ -1927,7 +1934,7 @@ out:
 failed:
 	/* Free the resource for the port failed */
 	if (priv) {
-		if (priv->dev_state_qsv)
+		if (!is_reset && priv->dev_state_qsv)
 			rte_free(priv->dev_state_qsv);
 
 		if (priv->ib_parent_pd)

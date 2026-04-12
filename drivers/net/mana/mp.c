@@ -2,9 +2,11 @@
  * Copyright 2022 Microsoft Corporation
  */
 
+#include <sys/mman.h>
 #include <rte_malloc.h>
 #include <ethdev_driver.h>
 #include <rte_log.h>
+#include <rte_eal_paging.h>
 #include <stdlib.h>
 #include <unistd.h>
 
@@ -125,8 +127,13 @@ mana_mp_reset_enter(struct rte_eth_dev *dev)
 {
 	struct mana_process_priv *proc_priv = dev->process_private;
 
+	void *addr = proc_priv->db_page;
+
 	/* Reset the db_page to NULL */
 	proc_priv->db_page = (void *)0;
+
+	if (addr)
+		(void) munmap(addr, rte_mem_page_size());
 
 	DRV_LOG(DEBUG, "All secondary threads are quiescent");
 	return 0;
@@ -158,6 +165,7 @@ mana_mp_reset_exit(void *arg)
 	ret = mana_map_doorbell_secondary(dev, fd);
 	if (ret) {
 		DRV_LOG(ERR, "Failed secondary doorbell map %d", fd);
+		close(fd);
 		ret = ENODEV;
 		goto out;
 	}
@@ -386,7 +394,7 @@ mana_mp_req_on_rxtx(struct rte_eth_dev *dev, enum mana_mp_req_type type)
 {
 	struct rte_mp_msg mp_req = { 0 };
 	struct rte_mp_msg *mp_res;
-	struct rte_mp_reply mp_rep;
+	struct rte_mp_reply mp_rep = { 0 };
 	struct mana_mp_param *res;
 	struct timespec ts = {.tv_sec = MANA_MP_REQ_TIMEOUT_SEC, .tv_nsec = 0};
 	int i, ret = 0;
