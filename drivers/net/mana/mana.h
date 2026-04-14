@@ -382,9 +382,9 @@ struct mana_priv {
 	uint64_t max_mr_size;
 	struct mana_mr_btree mr_btree;
 	rte_spinlock_t	mr_btree_lock;
-	volatile enum mana_device_state dev_state;
+	RTE_ATOMIC(enum mana_device_state) dev_state;
 	struct rte_rcu_qsbr *dev_state_qsv;
-	/* lock for sychronizing mana reset and some mana_dev_ops callbacks */
+	/* lock for synchronizing mana reset and some mana_dev_ops callbacks */
 	rte_spinlock_t reset_ops_lock;
 };
 

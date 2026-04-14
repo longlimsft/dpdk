@@ -139,48 +139,6 @@ mana_mp_reset_enter(struct rte_eth_dev *dev)
 	return 0;
 }
 
-static uint32_t
-mana_mp_reset_exit(void *arg)
-{
-	struct rte_eth_dev *dev = (struct rte_eth_dev *)arg;
-	struct mana_process_priv *proc_priv = dev->process_private;
-	int ret = 0;
-	int fd;
-
-	if (proc_priv->db_page != 0) {
-		/* Doorbell already mapped. Nothing to do */
-		DRV_LOG(DEBUG, "Secondary doorbell already mapped to %p",
-			proc_priv->db_page);
-		goto out;
-	}
-
-	/* Get the new IB FD from the primary process */
-	fd = mana_mp_req_verbs_cmd_fd(dev);
-	if (fd < 0) {
-		DRV_LOG(ERR, "Failed to get FD %d", fd);
-		ret = ENODEV;
-		goto out;
-	}
-
-	ret = mana_map_doorbell_secondary(dev, fd);
-	if (ret) {
-		DRV_LOG(ERR, "Failed secondary doorbell map %d", fd);
-		close(fd);
-		ret = ENODEV;
-		goto out;
-	}
-
-	/* fd is no not used after mapping doorbell */
-	close(fd);
-
-out:
-	if (ret) {
-		DRV_LOG(ERR,
-			"Secondary tx will NOT recover from device reset");
-	}
-	return ret;
-}
-
 static int
 mana_mp_secondary_handle(const struct rte_mp_msg *mp_msg, const void *peer)
 {
@@ -242,22 +200,36 @@ mana_mp_secondary_handle(const struct rte_mp_msg *mp_msg, const void *peer)
 
 	case MANA_MP_REQ_RESET_EXIT:
 		DRV_LOG(INFO, "Port %u reset exit", dev->data->port_id);
-		rte_thread_t tid;
+		{
+			struct mana_process_priv *proc_priv =
+				dev->process_private;
 
-		/*
-		 * Schedule a thread requesting primary to map doorbell
-		 * page. The thread uses the same IPC mechanism. So, it can
-		 * complete only after this parent thread exited.
-		 */
-		ret = rte_thread_create_control(&tid, "Secondary reset exit",
-						mana_mp_reset_exit, dev);
-		if (ret) {
-			DRV_LOG(ERR, "Failed to create thread for handling "
-				"reset exit, ret %d ", ret);
-			res->result = ret;
-		} else {
-			rte_thread_detach(tid);
-			res->result = 0;
+			if (proc_priv->db_page != 0) {
+				DRV_LOG(DEBUG,
+					"Secondary doorbell already "
+					"mapped to %p",
+					proc_priv->db_page);
+				res->result = 0;
+			} else if (mp_msg->num_fds < 1) {
+				DRV_LOG(ERR,
+					"No FD in RESET_EXIT message");
+				res->result = -EINVAL;
+			} else {
+				int fd = mp_msg->fds[0];
+
+				ret = mana_map_doorbell_secondary(
+					dev, fd);
+				if (ret) {
+					DRV_LOG(ERR,
+						"Failed secondary "
+						"doorbell map %d",
+						fd);
+					res->result = -ENODEV;
+				} else {
+					res->result = 0;
+				}
+				close(fd);
+			}
 		}
 		ret = rte_mp_reply(&mp_res, peer);
 		break;
@@ -410,6 +382,14 @@ mana_mp_req_on_rxtx(struct rte_eth_dev *dev, enum mana_mp_req_type type)
 		return 0;
 
 	mp_init_msg(&mp_req, type, dev->data->port_id);
+
+	/* Include IB cmd FD for secondary doorbell remap */
+	if (type == MANA_MP_REQ_RESET_EXIT) {
+		struct mana_priv *priv = dev->data->dev_private;
+
+		mp_req.num_fds = 1;
+		mp_req.fds[0] = priv->ib_ctx->cmd_fd;
+	}
 
 	ret = rte_mp_request_sync(&mp_req, &mp_rep, &ts);
 	if (ret) {

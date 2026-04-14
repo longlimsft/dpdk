@@ -211,7 +211,8 @@ mana_tx_burst(void *dpdk_txq, struct rte_mbuf **tx_pkts, uint16_t nb_pkts)
 
 	rte_rcu_qsbr_thread_online(dstate_qsv, tid);
 
-	if (unlikely(priv->dev_state != MANA_DEV_ACTIVE || !db_page)) {
+	if (unlikely(rte_atomic_load_explicit(&priv->dev_state,
+			    rte_memory_order_acquire) != MANA_DEV_ACTIVE || !db_page)) {
 		/* Device reset event occurred. */
 		rte_rcu_qsbr_thread_offline(dstate_qsv, tid);
 		return 0;

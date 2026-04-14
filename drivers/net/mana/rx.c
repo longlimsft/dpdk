@@ -37,6 +37,11 @@ mana_rq_ring_doorbell(struct mana_rxq *rxq)
 		db_page = process_priv->db_page;
 	}
 
+	if (!db_page) {
+		DP_LOG(ERR, "db_page is NULL, cannot ring RX doorbell");
+		return -EINVAL;
+	}
+
 	/* Hardware Spec specifies that software client should set 0 for
 	 * wqe_cnt for Receive Queues.
 	 */
@@ -457,7 +462,8 @@ mana_rx_burst(void *dpdk_rxq, struct rte_mbuf **pkts, uint16_t pkts_n)
 
 	rte_rcu_qsbr_thread_online(dstate_qsv, tid);
 
-	if (unlikely(priv->dev_state != MANA_DEV_ACTIVE)) {
+	if (unlikely(rte_atomic_load_explicit(&priv->dev_state,
+			    rte_memory_order_acquire) != MANA_DEV_ACTIVE)) {
 		/* Device reset occurred. */
 		rte_rcu_qsbr_thread_offline(dstate_qsv, tid);
 		return 0;
