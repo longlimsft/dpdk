@@ -344,7 +344,7 @@ enum mana_device_state {
 	MANA_DEV_RESET_ENTER	= 1,
 	/*
 	 * Reset enter processing completed.
-	 * Waiting for reset exit or in reset exit processing
+	 * Waiting for reset exit or in reset exit processing.
 	 */
 	MANA_DEV_RESET_EXIT	= 2,
 	/* Reset failed */

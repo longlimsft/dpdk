@@ -265,10 +265,10 @@ mana_dev_stop(struct rte_eth_dev *dev)
 	int ret;
 	struct mana_priv *priv = dev->data->dev_private;
 
-	if (rte_atomic_load_explicit(&priv->dev_state,
-			    rte_memory_order_acquire) == MANA_DEV_ACTIVE ||
-	    rte_atomic_load_explicit(&priv->dev_state,
-			    rte_memory_order_acquire) == MANA_DEV_RESET_FAILED) {
+	enum mana_device_state state = rte_atomic_load_explicit(
+			&priv->dev_state, rte_memory_order_acquire);
+	if (state == MANA_DEV_ACTIVE ||
+	    state == MANA_DEV_RESET_FAILED) {
 		rxq_intr_disable(priv);
 		DRV_LOG(DEBUG, "rxq_intr_disable called");
 	}
@@ -307,10 +307,10 @@ mana_dev_close(struct rte_eth_dev *dev)
 	DRV_LOG(DEBUG, "Free MR for priv %p", priv);
 	mana_remove_all_mr(priv);
 
-	if (rte_atomic_load_explicit(&priv->dev_state,
-			    rte_memory_order_acquire) == MANA_DEV_ACTIVE ||
-	    rte_atomic_load_explicit(&priv->dev_state,
-			    rte_memory_order_acquire) == MANA_DEV_RESET_FAILED) {
+	enum mana_device_state state = rte_atomic_load_explicit(
+			&priv->dev_state, rte_memory_order_acquire);
+	if (state == MANA_DEV_ACTIVE ||
+	    state == MANA_DEV_RESET_FAILED) {
 		ret = mana_intr_uninstall(priv);
 		if (ret)
 			return ret;
@@ -333,10 +333,10 @@ mana_dev_close(struct rte_eth_dev *dev)
 		priv->ib_pd = NULL;
 	}
 
-	if (rte_atomic_load_explicit(&priv->dev_state,
-			    rte_memory_order_acquire) == MANA_DEV_ACTIVE ||
-	    rte_atomic_load_explicit(&priv->dev_state,
-			    rte_memory_order_acquire) == MANA_DEV_RESET_FAILED) {
+	state = rte_atomic_load_explicit(
+			&priv->dev_state, rte_memory_order_acquire);
+	if (state == MANA_DEV_ACTIVE ||
+	    state == MANA_DEV_RESET_FAILED) {
 		ret = ibv_close_device(priv->ib_ctx);
 		if (ret) {
 			ret = errno;
@@ -1305,8 +1305,15 @@ mana_reset_enter(struct mana_priv *priv)
 
 	ret = rte_eal_alarm_set(MANA_RESET_TIMEOUT_US,
 				mana_reset_timeout, priv);
-	if (ret)
+	if (ret) {
 		DRV_LOG(ERR, "Failed to set reset timeout alarm ret %d", ret);
+		DRV_LOG(ERR, "No timeout protection, transitioning to RESET_FAILED");
+		rte_atomic_store_explicit(&priv->dev_state,
+					 MANA_DEV_RESET_FAILED,
+					 rte_memory_order_release);
+		rte_spinlock_unlock(&priv->reset_ops_lock);
+		return;
+	}
 
 	DRV_LOG(DEBUG, "Waiting for reset complete event");
 
@@ -1327,12 +1334,22 @@ mana_reset_exit_delay(void *arg)
 	struct rte_pci_device *pci_dev;
 
 	DRV_LOG(DEBUG, "Delayed mana device reset complete processing");
-	if (rte_atomic_load_explicit(&priv->dev_state,
-			    rte_memory_order_acquire) != MANA_DEV_RESET_EXIT) {
-		DRV_LOG(ERR, "Wrong device state %d, exiting",
-			rte_atomic_load_explicit(&priv->dev_state,
-			rte_memory_order_acquire));
-		/* Timeout or other path already took ownership.
+
+	/*
+	 * Use CAS to verify state is still RESET_EXIT. The alarm is
+	 * guaranteed cancelled by mana_reset_exit before this thread
+	 * is created, so timeout cannot race here. The CAS is purely
+	 * defensive — symmetric with mana_reset_timeout's CAS.
+	 */
+	enum mana_device_state expected = MANA_DEV_RESET_EXIT;
+	if (!rte_atomic_compare_exchange_strong_explicit(
+			&priv->dev_state, &expected,
+			MANA_DEV_RESET_EXIT,
+			rte_memory_order_acq_rel,
+			rte_memory_order_acquire)) {
+		DRV_LOG(ERR, "Wrong device state %d, exiting", expected);
+		/*
+		 * Timeout or other path already took ownership.
 		 * Do NOT unlock — the other path already did.
 		 */
 		return ret;

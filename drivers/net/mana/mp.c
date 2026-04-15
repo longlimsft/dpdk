@@ -317,7 +317,7 @@ mana_mp_req_verbs_cmd_fd(struct rte_eth_dev *dev)
 	}
 
 	ret = mp_res->fds[0];
-	DRV_LOG(ERR, "port %u command FD from primary is %d",
+	DRV_LOG(DEBUG, "port %u command FD from primary is %d",
 		dev->data->port_id, ret);
 exit:
 	free(mp_rep.msgs);
