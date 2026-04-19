@@ -72,6 +72,7 @@ New Features
   * Added support for Link State interrupt in ``iface`` mode.
   * Added ``eof`` devarg to use link state to signal end of receive
     file input.
+  * Added unit test suite.
 
 
 
