@@ -177,7 +177,7 @@ mana_stop_rx_queues(struct rte_eth_dev *dev)
 
 	for (i = 0; i < priv->num_queues; i++)
 		if (dev->data->rx_queue_state[i] == RTE_ETH_QUEUE_STATE_STOPPED)
-			return -EINVAL;
+			return 0;
 
 	if (priv->rwq_qp) {
 		ret = ibv_destroy_qp(priv->rwq_qp);

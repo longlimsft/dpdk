@@ -297,12 +297,16 @@ mana_dev_stop(struct rte_eth_dev *dev)
 }
 
 static int mana_intr_uninstall(struct mana_priv *priv);
+static void mana_reset_timer_cb(void *arg);
 
 static int
 mana_dev_close(struct rte_eth_dev *dev)
 {
 	struct mana_priv *priv = dev->data->dev_private;
 	int ret;
+
+	/* Cancel pending reset timer to prevent firing during teardown */
+	rte_eal_alarm_cancel(mana_reset_timer_cb, priv);
 
 	DRV_LOG(DEBUG, "Free MR for priv %p", priv);
 	mana_remove_all_mr(priv);
@@ -337,10 +341,13 @@ mana_dev_close(struct rte_eth_dev *dev)
 			&priv->dev_state, rte_memory_order_acquire);
 	if (state == MANA_DEV_ACTIVE ||
 	    state == MANA_DEV_RESET_FAILED) {
-		ret = ibv_close_device(priv->ib_ctx);
-		if (ret) {
-			ret = errno;
-			return ret;
+		if (priv->ib_ctx) {
+			ret = ibv_close_device(priv->ib_ctx);
+			if (ret) {
+				ret = errno;
+				return ret;
+			}
+			priv->ib_ctx = NULL;
 		}
 	}
 
@@ -440,6 +447,11 @@ mana_dev_info_get_lock(struct rte_eth_dev *dev,
 	struct mana_priv *priv = dev->data->dev_private;
 	int ret;
 	if (rte_spinlock_trylock(&priv->reset_ops_lock)) {
+		if (rte_atomic_load_explicit(&priv->dev_state,
+		    rte_memory_order_acquire) != MANA_DEV_ACTIVE) {
+			rte_spinlock_unlock(&priv->reset_ops_lock);
+			return -EBUSY;
+		}
 		ret = mana_dev_info_get(dev, dev_info);
 		rte_spinlock_unlock(&priv->reset_ops_lock);
 	} else {
@@ -617,6 +629,11 @@ mana_dev_tx_queue_setup_lock(struct rte_eth_dev *dev, uint16_t queue_idx,
 	struct mana_priv *priv = dev->data->dev_private;
 	int ret;
 	if (rte_spinlock_trylock(&priv->reset_ops_lock)) {
+		if (rte_atomic_load_explicit(&priv->dev_state,
+		    rte_memory_order_acquire) != MANA_DEV_ACTIVE) {
+			rte_spinlock_unlock(&priv->reset_ops_lock);
+			return -EBUSY;
+		}
 		ret = mana_dev_tx_queue_setup(dev, queue_idx,
 					      nb_desc, socket_id, tx_conf);
 		rte_spinlock_unlock(&priv->reset_ops_lock);
@@ -712,6 +729,11 @@ mana_dev_rx_queue_setup_lock(struct rte_eth_dev *dev, uint16_t queue_idx,
 	struct mana_priv *priv = dev->data->dev_private;
 	int ret;
 	if (rte_spinlock_trylock(&priv->reset_ops_lock)) {
+		if (rte_atomic_load_explicit(&priv->dev_state,
+		    rte_memory_order_acquire) != MANA_DEV_ACTIVE) {
+			rte_spinlock_unlock(&priv->reset_ops_lock);
+			return -EBUSY;
+		}
 		ret = mana_dev_rx_queue_setup(dev, queue_idx, nb_desc,
 					      socket_id, rx_conf, mp);
 		rte_spinlock_unlock(&priv->reset_ops_lock);
@@ -919,6 +941,12 @@ _func##_lock(struct rte_eth_dev *dev)					\
 	struct mana_priv *priv = dev->data->dev_private;		\
 	int ret;							\
 	if (rte_spinlock_trylock(&priv->reset_ops_lock)) {		\
+		if (rte_atomic_load_explicit(&priv->dev_state,		\
+		    rte_memory_order_acquire) !=				\
+		    MANA_DEV_ACTIVE) {					\
+			rte_spinlock_unlock(&priv->reset_ops_lock);	\
+			return -EBUSY;					\
+		}							\
 		ret = _func(dev);					\
 		rte_spinlock_unlock(&priv->reset_ops_lock);		\
 	} else {							\
@@ -931,10 +959,59 @@ MANA_OPS_1_LOCK(mana_dev_configure)
 
 MANA_OPS_1_LOCK(mana_dev_start)
 
-MANA_OPS_1_LOCK(mana_dev_stop)
-
-MANA_OPS_1_LOCK(mana_dev_close)
 #undef MANA_OPS_1_LOCK
+
+/*
+ * Custom lock wrappers for dev_stop and dev_close.
+ * These use a blocking lock (not trylock) so they wait for any
+ * in-progress mana_reset_enter or mana_reset_exit_delay to finish,
+ * rather than returning -EBUSY. When the device is not in
+ * MANA_DEV_ACTIVE state, they cancel the pending reset timer,
+ * transition state to MANA_DEV_ACTIVE, and return success without
+ * calling the underlying function (which was already called by
+ * mana_reset_enter).
+ */
+static int
+mana_dev_stop_lock(struct rte_eth_dev *dev)
+{
+	struct mana_priv *priv = dev->data->dev_private;
+	int ret;
+
+	rte_spinlock_lock(&priv->reset_ops_lock);
+
+	if (rte_atomic_load_explicit(&priv->dev_state,
+	    rte_memory_order_acquire) != MANA_DEV_ACTIVE) {
+		rte_eal_alarm_cancel(mana_reset_timer_cb, priv);
+		rte_atomic_store_explicit(&priv->dev_state,
+			MANA_DEV_ACTIVE, rte_memory_order_release);
+		rte_spinlock_unlock(&priv->reset_ops_lock);
+		return 0;
+	}
+
+	ret = mana_dev_stop(dev);
+	rte_spinlock_unlock(&priv->reset_ops_lock);
+	return ret;
+}
+
+static int
+mana_dev_close_lock(struct rte_eth_dev *dev)
+{
+	struct mana_priv *priv = dev->data->dev_private;
+	int ret;
+
+	rte_spinlock_lock(&priv->reset_ops_lock);
+
+	if (rte_atomic_load_explicit(&priv->dev_state,
+	    rte_memory_order_acquire) != MANA_DEV_ACTIVE) {
+		rte_eal_alarm_cancel(mana_reset_timer_cb, priv);
+		rte_atomic_store_explicit(&priv->dev_state,
+			MANA_DEV_ACTIVE, rte_memory_order_release);
+	}
+
+	ret = mana_dev_close(dev);
+	rte_spinlock_unlock(&priv->reset_ops_lock);
+	return ret;
+}
 
 #define MANA_OPS_2_LOCK(_func)						\
 static int								\
@@ -944,6 +1021,12 @@ _func##_lock(struct rte_eth_dev *dev,					\
 	struct mana_priv *priv = dev->data->dev_private;		\
 	int ret;							\
 	if (rte_spinlock_trylock(&priv->reset_ops_lock)) {		\
+		if (rte_atomic_load_explicit(&priv->dev_state,		\
+		    rte_memory_order_acquire) !=				\
+		    MANA_DEV_ACTIVE) {					\
+			rte_spinlock_unlock(&priv->reset_ops_lock);	\
+			return -EBUSY;					\
+		}							\
 		ret = _func(dev, rss_conf);				\
 		rte_spinlock_unlock(&priv->reset_ops_lock);		\
 	} else {							\
@@ -963,6 +1046,14 @@ _func##_lock(struct rte_eth_dev *dev, uint16_t _arg)			\
 {									\
 	struct mana_priv *priv = dev->data->dev_private;		\
 	if (rte_spinlock_trylock(&priv->reset_ops_lock)) {		\
+		if (rte_atomic_load_explicit(&priv->dev_state,		\
+		    rte_memory_order_acquire) !=				\
+		    MANA_DEV_ACTIVE) {					\
+			rte_spinlock_unlock(&priv->reset_ops_lock);	\
+			DRV_LOG(ERR, "Device reset in progress, "	\
+				"%s not called", #_func);		\
+			return;						\
+		}							\
 		_func(dev, _arg);					\
 		rte_spinlock_unlock(&priv->reset_ops_lock);		\
 	} else {							\
@@ -983,6 +1074,12 @@ _func##_lock(struct rte_eth_dev *dev, uint16_t _arg)			\
 	struct mana_priv *priv = dev->data->dev_private;		\
 	int ret;							\
 	if (rte_spinlock_trylock(&priv->reset_ops_lock)) {		\
+		if (rte_atomic_load_explicit(&priv->dev_state,		\
+		    rte_memory_order_acquire) !=				\
+		    MANA_DEV_ACTIVE) {					\
+			rte_spinlock_unlock(&priv->reset_ops_lock);	\
+			return -EBUSY;					\
+		}							\
 		ret = _func(dev, _arg);					\
 		rte_spinlock_unlock(&priv->reset_ops_lock);		\
 	} else {							\
@@ -1212,32 +1309,43 @@ mana_ibv_device_to_pci_addr(const struct ibv_device *device,
 static int mana_pci_probe(struct rte_pci_driver *pci_drv,
 			  struct rte_pci_device *pci_dev);
 static void mana_intr_handler(void *arg);
+static void mana_reset_exit(struct mana_priv *priv);
 
-/* Timeout for waiting for PORT_ACTIVE after PORT_ERR */
-#define MANA_RESET_TIMEOUT_US (90 * 1000000ULL) /* 90 seconds */
+/* Delay before initiating reset exit after reset enter completes */
+#define MANA_RESET_TIMER_US (15 * 1000000ULL) /* 15 seconds */
 
 static void
-mana_reset_timeout(void *arg)
+mana_reset_timer_cb(void *arg)
 {
 	struct mana_priv *priv = (struct mana_priv *)arg;
-	enum mana_device_state expected = MANA_DEV_RESET_EXIT;
 
-	/* Use CAS to claim ownership — only one of timeout or
-	 * mana_reset_exit_delay can transition out of RESET_EXIT.
+	/* Try to acquire the lock. If the application is already
+	 * holding it (e.g. doing dev_stop/dev_close), reschedule
+	 * the timer to retry later.
 	 */
-	if (!rte_atomic_compare_exchange_strong_explicit(
-			&priv->dev_state, &expected,
-			MANA_DEV_RESET_FAILED,
-			rte_memory_order_acq_rel,
-			rte_memory_order_acquire)) {
-		DRV_LOG(DEBUG, "Reset timeout fired but state is %d",
-			expected);
+	if (!rte_spinlock_trylock(&priv->reset_ops_lock)) {
+		DRV_LOG(DEBUG, "Reset timer: lock held, rescheduling");
+		if (rte_atomic_load_explicit(&priv->dev_state,
+		    rte_memory_order_acquire) == MANA_DEV_RESET_EXIT) {
+			if (rte_eal_alarm_set(1000000,
+					      mana_reset_timer_cb, priv))
+				DRV_LOG(ERR, "Failed to reschedule reset timer");
+		}
 		return;
 	}
 
-	DRV_LOG(ERR, "Reset timeout: PORT_ACTIVE not received within %us",
-		(unsigned int)(MANA_RESET_TIMEOUT_US / 1000000));
-	rte_spinlock_unlock(&priv->reset_ops_lock);
+	if (rte_atomic_load_explicit(&priv->dev_state,
+	    rte_memory_order_acquire) != MANA_DEV_RESET_EXIT) {
+		DRV_LOG(DEBUG, "Reset timer fired but not in RESET_EXIT state");
+		rte_spinlock_unlock(&priv->reset_ops_lock);
+		return;
+	}
+
+	DRV_LOG(INFO, "Reset timer fired, initiating reset exit");
+	mana_reset_exit(priv);
+	/* Lock is released by mana_reset_exit_delay at the end of
+	 * the reset exit processing.
+	 */
 }
 
 static void
@@ -1303,11 +1411,11 @@ mana_reset_enter(struct mana_priv *priv)
 	rte_atomic_store_explicit(&priv->dev_state, MANA_DEV_RESET_EXIT,
 				     rte_memory_order_release);
 
-	ret = rte_eal_alarm_set(MANA_RESET_TIMEOUT_US,
-				mana_reset_timeout, priv);
+	ret = rte_eal_alarm_set(MANA_RESET_TIMER_US,
+				mana_reset_timer_cb, priv);
 	if (ret) {
-		DRV_LOG(ERR, "Failed to set reset timeout alarm ret %d", ret);
-		DRV_LOG(ERR, "No timeout protection, transitioning to RESET_FAILED");
+		DRV_LOG(ERR, "Failed to set reset timer ret %d", ret);
+		DRV_LOG(ERR, "Cannot schedule reset exit, transitioning to RESET_FAILED");
 		rte_atomic_store_explicit(&priv->dev_state,
 					 MANA_DEV_RESET_FAILED,
 					 rte_memory_order_release);
@@ -1315,8 +1423,10 @@ mana_reset_enter(struct mana_priv *priv)
 		return;
 	}
 
-	DRV_LOG(DEBUG, "Waiting for reset complete event");
+	DRV_LOG(DEBUG, "Reset exit timer scheduled");
 
+	/* Release the lock so the application can call dev_stop/dev_close */
+	rte_spinlock_unlock(&priv->reset_ops_lock);
 	return;
 
 reset_failed:
@@ -1335,31 +1445,18 @@ mana_reset_exit_delay(void *arg)
 
 	DRV_LOG(DEBUG, "Delayed mana device reset complete processing");
 
-	/*
-	 * Use CAS to verify state is still RESET_EXIT. The alarm is
-	 * guaranteed cancelled by mana_reset_exit before this thread
-	 * is created, so timeout cannot race here. The CAS is purely
-	 * defensive — symmetric with mana_reset_timeout's CAS.
+	/* If the app called dev_stop/dev_close during the timer window,
+	 * state is no longer RESET_EXIT. Nothing to do.
 	 */
-	enum mana_device_state expected = MANA_DEV_RESET_EXIT;
-	if (!rte_atomic_compare_exchange_strong_explicit(
-			&priv->dev_state, &expected,
-			MANA_DEV_RESET_EXIT,
-			rte_memory_order_acq_rel,
-			rte_memory_order_acquire)) {
-		DRV_LOG(ERR, "Wrong device state %d, exiting", expected);
-		/*
-		 * Timeout or other path already took ownership.
-		 * Do NOT unlock — the other path already did.
-		 */
+	if (rte_atomic_load_explicit(&priv->dev_state,
+	    rte_memory_order_acquire) != MANA_DEV_RESET_EXIT) {
+		DRV_LOG(DEBUG, "State is not RESET_EXIT, skipping");
+		rte_spinlock_unlock(&priv->reset_ops_lock);
 		return ret;
 	}
 
 	dev = &rte_eth_devices[priv->port_id];
 	pci_dev = RTE_ETH_DEV_TO_PCI(dev);
-
-	/* Cancel the timeout alarm to prevent race during reset-exit */
-	rte_eal_alarm_cancel(mana_reset_timeout, priv);
 
 	DRV_LOG(DEBUG, "Resetting dev = %p, priv = %p", dev, priv);
 
@@ -1495,8 +1592,8 @@ mana_reset_exit(struct mana_priv *priv)
 	}
 	DRV_LOG(DEBUG, "Entering into device reset complete processing");
 
-	/* Cancel the reset timeout alarm — PORT_ACTIVE arrived in time */
-	rte_eal_alarm_cancel(mana_reset_timeout, priv);
+	/* Cancel the reset timer (harmless no-op if already fired) */
+	rte_eal_alarm_cancel(mana_reset_timer_cb, priv);
 
 	rxq_intr_disable(priv);
 
@@ -1544,13 +1641,6 @@ mana_intr_handler(void *arg)
 
 		switch (event.event_type) {
 		case IBV_EVENT_DEVICE_FATAL:
-			dev = &rte_eth_devices[priv->port_id];
-			if (dev->data->dev_conf.intr_conf.rmv)
-				rte_eth_dev_callback_process(dev,
-					RTE_ETH_EVENT_INTR_RMV, NULL);
-			break;
-
-		case IBV_EVENT_PORT_ERR:
 			DRV_LOG(INFO, "Device reset event received");
 			if (rte_atomic_load_explicit(&priv->dev_state,
 			    rte_memory_order_acquire) == MANA_DEV_ACTIVE) {
@@ -1559,22 +1649,11 @@ mana_intr_handler(void *arg)
 			} else {
 				DRV_LOG(ERR, "Already in reset handling");
 			}
-			break;
 
-		case IBV_EVENT_PORT_ACTIVE:
-			DRV_LOG(INFO, "Device reset Complete event received");
-			if (rte_atomic_load_explicit(&priv->dev_state,
-			    rte_memory_order_acquire) == MANA_DEV_RESET_EXIT) {
-				mana_reset_exit(priv);
-			} else {
-				if (rte_atomic_load_explicit(&priv->dev_state,
-			    rte_memory_order_acquire) == MANA_DEV_ACTIVE)
-					DRV_LOG(ERR, "Not in "
-						"MANA_DEV_RESET_EXIT state");
-				else
-					DRV_LOG(ERR, "Still in "
-						"MANA_DEV_RESET_ENTER state");
-			}
+			dev = &rte_eth_devices[priv->port_id];
+			if (dev->data->dev_conf.intr_conf.rmv)
+				rte_eth_dev_callback_process(dev,
+					RTE_ETH_EVENT_INTR_RMV, NULL);
 			break;
 
 		default:
@@ -1590,6 +1669,9 @@ mana_intr_uninstall(struct mana_priv *priv)
 {
 	int ret;
 
+	if (!priv->intr_handle)
+		return 0;
+
 	ret = rte_intr_callback_unregister(priv->intr_handle,
 					   mana_intr_handler, priv);
 	if (ret <= 0) {
@@ -1598,6 +1680,7 @@ mana_intr_uninstall(struct mana_priv *priv)
 	}
 
 	rte_intr_instance_free(priv->intr_handle);
+	priv->intr_handle = NULL;
 
 	return 0;
 }
