@@ -5,6 +5,8 @@
 #ifndef __MANA_H__
 #define __MANA_H__
 
+#include <pthread.h>
+
 #define	PCI_VENDOR_ID_MICROSOFT		0x1414
 #define PCI_DEVICE_ID_MICROSOFT_MANA_PF	0x00b9
 #define PCI_DEVICE_ID_MICROSOFT_MANA	0x00ba
@@ -386,6 +388,12 @@ struct mana_priv {
 	struct rte_rcu_qsbr *dev_state_qsv;
 	/* lock for synchronizing mana reset and some mana_dev_ops callbacks */
 	rte_spinlock_t reset_ops_lock;
+	/* Reset thread ID, valid when reset_thread_active is true */
+	rte_thread_t reset_thread;
+	bool reset_thread_active;
+	/* Condvar to wake reset thread early on PCI remove */
+	pthread_mutex_t reset_cond_mutex;
+	pthread_cond_t reset_cond;
 };
 
 struct mana_txq_desc {

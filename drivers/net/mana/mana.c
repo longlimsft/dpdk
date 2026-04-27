@@ -297,16 +297,12 @@ mana_dev_stop(struct rte_eth_dev *dev)
 }
 
 static int mana_intr_uninstall(struct mana_priv *priv);
-static void mana_reset_timer_cb(void *arg);
 
 static int
 mana_dev_close(struct rte_eth_dev *dev)
 {
 	struct mana_priv *priv = dev->data->dev_private;
 	int ret;
-
-	/* Cancel pending reset timer to prevent firing during teardown */
-	rte_eal_alarm_cancel(mana_reset_timer_cb, priv);
 
 	DRV_LOG(DEBUG, "Free MR for priv %p", priv);
 	mana_remove_all_mr(priv);
@@ -981,7 +977,6 @@ mana_dev_stop_lock(struct rte_eth_dev *dev)
 
 	if (rte_atomic_load_explicit(&priv->dev_state,
 	    rte_memory_order_acquire) != MANA_DEV_ACTIVE) {
-		rte_eal_alarm_cancel(mana_reset_timer_cb, priv);
 		rte_atomic_store_explicit(&priv->dev_state,
 			MANA_DEV_ACTIVE, rte_memory_order_release);
 		rte_spinlock_unlock(&priv->reset_ops_lock);
@@ -999,11 +994,24 @@ mana_dev_close_lock(struct rte_eth_dev *dev)
 	struct mana_priv *priv = dev->data->dev_private;
 	int ret;
 
+	/* Signal reset thread to stop by setting state, then wait for it.
+	 * Must be done before acquiring the lock to avoid deadlock
+	 * (reset thread also acquires the lock).
+	 */
+	if (priv->reset_thread_active) {
+		pthread_mutex_lock(&priv->reset_cond_mutex);
+		rte_atomic_store_explicit(&priv->dev_state,
+			MANA_DEV_ACTIVE, rte_memory_order_release);
+		pthread_cond_signal(&priv->reset_cond);
+		pthread_mutex_unlock(&priv->reset_cond_mutex);
+		rte_thread_join(priv->reset_thread, NULL);
+		priv->reset_thread_active = false;
+	}
+
 	rte_spinlock_lock(&priv->reset_ops_lock);
 
 	if (rte_atomic_load_explicit(&priv->dev_state,
 	    rte_memory_order_acquire) != MANA_DEV_ACTIVE) {
-		rte_eal_alarm_cancel(mana_reset_timer_cb, priv);
 		rte_atomic_store_explicit(&priv->dev_state,
 			MANA_DEV_ACTIVE, rte_memory_order_release);
 	}
@@ -1314,38 +1322,82 @@ static void mana_reset_exit(struct mana_priv *priv);
 /* Delay before initiating reset exit after reset enter completes */
 #define MANA_RESET_TIMER_US (15 * 1000000ULL) /* 15 seconds */
 
+/*
+ * Callback for PCI device removal events from EAL.
+ * If the device is in reset (RESET_EXIT state), this means the PCI
+ * device was hot-removed rather than a service reset. Cancel the
+ * recovery timer and notify netvsc via RTE_ETH_EVENT_INTR_RMV.
+ */
 static void
-mana_reset_timer_cb(void *arg)
+mana_pci_remove_event_cb(const char *device_name,
+			 enum rte_dev_event_type event, void *cb_arg)
+{
+	struct mana_priv *priv = cb_arg;
+	struct rte_eth_dev *dev;
+
+	if (event != RTE_DEV_EVENT_REMOVE)
+		return;
+
+	DRV_LOG(INFO, "PCI device %s removed", device_name);
+
+	/* Wake the reset thread immediately */
+	pthread_mutex_lock(&priv->reset_cond_mutex);
+	rte_atomic_store_explicit(&priv->dev_state,
+		MANA_DEV_RESET_FAILED, rte_memory_order_release);
+	pthread_cond_signal(&priv->reset_cond);
+	pthread_mutex_unlock(&priv->reset_cond_mutex);
+
+	rte_spinlock_lock(&priv->reset_ops_lock);
+
+	dev = &rte_eth_devices[priv->port_id];
+	DRV_LOG(INFO, "Sending RTE_ETH_EVENT_INTR_RMV for port %u",
+		priv->port_id);
+	rte_eth_dev_callback_process(dev,
+		RTE_ETH_EVENT_INTR_RMV, NULL);
+
+	rte_spinlock_unlock(&priv->reset_ops_lock);
+}
+
+/*
+ * Reset thread: sleeps for the reset timer period, then performs
+ * the reset exit sequence. Runs on a control thread so it can call
+ * rte_intr_callback_unregister_pending (which fails from alarm/intr thread).
+ */
+static uint32_t
+mana_reset_thread(void *arg)
 {
 	struct mana_priv *priv = (struct mana_priv *)arg;
+	struct timespec ts;
 
-	/* Try to acquire the lock. If the application is already
-	 * holding it (e.g. doing dev_stop/dev_close), reschedule
-	 * the timer to retry later.
-	 */
-	if (!rte_spinlock_trylock(&priv->reset_ops_lock)) {
-		DRV_LOG(DEBUG, "Reset timer: lock held, rescheduling");
-		if (rte_atomic_load_explicit(&priv->dev_state,
-		    rte_memory_order_acquire) == MANA_DEV_RESET_EXIT) {
-			if (rte_eal_alarm_set(1000000,
-					      mana_reset_timer_cb, priv))
-				DRV_LOG(ERR, "Failed to reschedule reset timer");
-		}
-		return;
-	}
+	DRV_LOG(INFO, "Reset thread started, waiting %us",
+		(unsigned int)(MANA_RESET_TIMER_US / 1000000));
+
+	/* Wait on condvar with timeout — can be woken early by PCI remove */
+	clock_gettime(CLOCK_REALTIME, &ts);
+	ts.tv_sec += MANA_RESET_TIMER_US / 1000000;
+
+	pthread_mutex_lock(&priv->reset_cond_mutex);
+	pthread_cond_timedwait(&priv->reset_cond, &priv->reset_cond_mutex, &ts);
+	pthread_mutex_unlock(&priv->reset_cond_mutex);
+
+	rte_spinlock_lock(&priv->reset_ops_lock);
 
 	if (rte_atomic_load_explicit(&priv->dev_state,
 	    rte_memory_order_acquire) != MANA_DEV_RESET_EXIT) {
-		DRV_LOG(DEBUG, "Reset timer fired but not in RESET_EXIT state");
+		DRV_LOG(INFO, "Reset thread: dev_state=%d, skipping",
+			(int)rte_atomic_load_explicit(&priv->dev_state,
+			rte_memory_order_acquire));
+		priv->reset_thread_active = false;
 		rte_spinlock_unlock(&priv->reset_ops_lock);
-		return;
+		return 0;
 	}
 
-	DRV_LOG(INFO, "Reset timer fired, initiating reset exit");
+	DRV_LOG(INFO, "Reset thread: initiating reset exit");
 	mana_reset_exit(priv);
 	/* Lock is released by mana_reset_exit_delay at the end of
-	 * the reset exit processing.
+	 * the reset exit processing. Thread flag is cleared there too.
 	 */
+	return 0;
 }
 
 static void
@@ -1411,19 +1463,22 @@ mana_reset_enter(struct mana_priv *priv)
 	rte_atomic_store_explicit(&priv->dev_state, MANA_DEV_RESET_EXIT,
 				     rte_memory_order_release);
 
-	ret = rte_eal_alarm_set(MANA_RESET_TIMER_US,
-				mana_reset_timer_cb, priv);
-	if (ret) {
-		DRV_LOG(ERR, "Failed to set reset timer ret %d", ret);
-		DRV_LOG(ERR, "Cannot schedule reset exit, transitioning to RESET_FAILED");
-		rte_atomic_store_explicit(&priv->dev_state,
-					 MANA_DEV_RESET_FAILED,
-					 rte_memory_order_release);
-		rte_spinlock_unlock(&priv->reset_ops_lock);
-		return;
+	{
+		ret = rte_thread_create_control(&priv->reset_thread,
+						"mana_reset_thread",
+						mana_reset_thread, priv);
+		if (ret) {
+			DRV_LOG(ERR, "Failed to create reset thread ret %d", ret);
+			rte_atomic_store_explicit(&priv->dev_state,
+						 MANA_DEV_RESET_FAILED,
+						 rte_memory_order_release);
+			rte_spinlock_unlock(&priv->reset_ops_lock);
+			return;
+		}
+		priv->reset_thread_active = true;
 	}
 
-	DRV_LOG(DEBUG, "Reset exit timer scheduled");
+	DRV_LOG(DEBUG, "Reset thread started");
 
 	/* Release the lock so the application can call dev_stop/dev_close */
 	rte_spinlock_unlock(&priv->reset_ops_lock);
@@ -1523,7 +1578,19 @@ mana_reset_exit_delay(void *arg)
 
 	DRV_LOG(DEBUG, "Exiting the reset complete processing");
 
+	DRV_LOG(INFO, "Sending RTE_ETH_EVENT_RECOVERY_SUCCESS for port %u",
+		priv->port_id);
+	rte_eth_dev_callback_process(dev,
+		RTE_ETH_EVENT_RECOVERY_SUCCESS, NULL);
+
 out:
+	if (ret) {
+		DRV_LOG(INFO, "Sending RTE_ETH_EVENT_RECOVERY_FAILED for port %u",
+			priv->port_id);
+		rte_eth_dev_callback_process(dev,
+			RTE_ETH_EVENT_RECOVERY_FAILED, NULL);
+	}
+	priv->reset_thread_active = false;
 	rte_spinlock_unlock(&priv->reset_ops_lock);
 	return ret;
 
@@ -1548,6 +1615,12 @@ mr_init_failed_rxq:
 	rte_atomic_store_explicit(&priv->dev_state, MANA_DEV_RESET_FAILED,
 				     rte_memory_order_release);
 
+	DRV_LOG(INFO, "Sending RTE_ETH_EVENT_RECOVERY_FAILED (MR init) for port %u",
+		priv->port_id);
+	rte_eth_dev_callback_process(dev,
+		RTE_ETH_EVENT_RECOVERY_FAILED, NULL);
+
+	priv->reset_thread_active = false;
 	rte_spinlock_unlock(&priv->reset_ops_lock);
 	return ret;
 }
@@ -1585,6 +1658,7 @@ static void
 mana_reset_exit(struct mana_priv *priv)
 {
 	int ret;
+	struct rte_eth_dev *dev;
 
 	if (!priv) {
 		DRV_LOG(ERR, "Private structure invalid");
@@ -1592,28 +1666,69 @@ mana_reset_exit(struct mana_priv *priv)
 	}
 	DRV_LOG(DEBUG, "Entering into device reset complete processing");
 
-	/* Cancel the reset timer (harmless no-op if already fired) */
-	rte_eal_alarm_cancel(mana_reset_timer_cb, priv);
-
 	rxq_intr_disable(priv);
 
 	/* Uninstall the interrupt handler as no longer needed */
 	ret = rte_intr_callback_unregister_pending(priv->intr_handle,
 						   mana_intr_handler, priv,
 						   mana_intr_handle_cleanup);
-	if (ret <= 0) {
-		DRV_LOG(ERR, "Failed to unregister intr_handler ret %d",
-			ret);
-		if (ret == 0)
-			DRV_LOG(ERR, "No intr_handler found");
-
-		rte_atomic_store_explicit(&priv->dev_state, MANA_DEV_RESET_FAILED,
-				     rte_memory_order_release);
-		goto failed;
-	} else {
+	if (ret > 0) {
 		DRV_LOG(DEBUG,
 			"%d intr callback marked for removal", ret);
+		/* mana_intr_handle_cleanup will be called asynchronously,
+		 * which frees intr_handle and spawns mana_reset_exit_delay.
+		 */
+		return;
 	}
+
+	if (ret == -EAGAIN) {
+		/* Interrupt source is inactive (device was destroyed during
+		 * reset). Use rte_intr_callback_unregister to properly remove
+		 * the fd from epoll and clean up the source.
+		 */
+		DRV_LOG(INFO, "Interrupt source inactive, cleaning up directly");
+		ret = rte_intr_callback_unregister(priv->intr_handle,
+						   mana_intr_handler, priv);
+		if (ret < 0)
+			DRV_LOG(ERR, "Failed to unregister intr callback ret %d", ret);
+		rte_intr_instance_free(priv->intr_handle);
+		priv->intr_handle = NULL;
+
+		rte_thread_t tid;
+		ret = rte_thread_create_control(&tid, "Mana reset exit delay",
+						mana_reset_exit_delay, priv);
+		if (ret) {
+			DRV_LOG(ERR, "Failed to create reset exit thread ret %d", ret);
+			rte_atomic_store_explicit(&priv->dev_state,
+				MANA_DEV_RESET_FAILED, rte_memory_order_release);
+
+			dev = &rte_eth_devices[priv->port_id];
+			DRV_LOG(INFO, "Sending RTE_ETH_EVENT_RECOVERY_FAILED (thread create) for port %u",
+				priv->port_id);
+			rte_eth_dev_callback_process(dev,
+				RTE_ETH_EVENT_RECOVERY_FAILED, NULL);
+
+			goto failed;
+		}
+		rte_thread_detach(tid);
+		return;
+	}
+
+	/* Other errors are fatal */
+	DRV_LOG(ERR, "Failed to unregister intr_handler ret %d", ret);
+	if (ret == 0)
+		DRV_LOG(ERR, "No intr_handler found");
+
+	rte_atomic_store_explicit(&priv->dev_state, MANA_DEV_RESET_FAILED,
+			     rte_memory_order_release);
+
+	dev = &rte_eth_devices[priv->port_id];
+	DRV_LOG(INFO, "Sending RTE_ETH_EVENT_RECOVERY_FAILED (intr unregister) for port %u",
+		priv->port_id);
+	rte_eth_dev_callback_process(dev,
+		RTE_ETH_EVENT_RECOVERY_FAILED, NULL);
+
+	goto failed;
 
 	return;
 
@@ -1641,19 +1756,24 @@ mana_intr_handler(void *arg)
 
 		switch (event.event_type) {
 		case IBV_EVENT_DEVICE_FATAL:
-			DRV_LOG(INFO, "Device reset event received");
+			DRV_LOG(INFO, "IBV_EVENT_DEVICE_FATAL received, dev_state=%d",
+				(int)rte_atomic_load_explicit(&priv->dev_state,
+				rte_memory_order_acquire));
 			if (rte_atomic_load_explicit(&priv->dev_state,
 			    rte_memory_order_acquire) == MANA_DEV_ACTIVE) {
 				rte_spinlock_lock(&priv->reset_ops_lock);
 				mana_reset_enter(priv);
-			} else {
-				DRV_LOG(ERR, "Already in reset handling");
-			}
 
-			dev = &rte_eth_devices[priv->port_id];
-			if (dev->data->dev_conf.intr_conf.rmv)
+				dev = &rte_eth_devices[priv->port_id];
+				DRV_LOG(INFO, "Sending RTE_ETH_EVENT_ERR_RECOVERING for port %u",
+					priv->port_id);
 				rte_eth_dev_callback_process(dev,
-					RTE_ETH_EVENT_INTR_RMV, NULL);
+					RTE_ETH_EVENT_ERR_RECOVERING, NULL);
+			} else {
+				DRV_LOG(ERR, "Already in reset handling, dev_state=%d",
+					(int)rte_atomic_load_explicit(&priv->dev_state,
+					rte_memory_order_acquire));
+			}
 			break;
 
 		default:
@@ -1668,9 +1788,17 @@ static int
 mana_intr_uninstall(struct mana_priv *priv)
 {
 	int ret;
+	struct rte_eth_dev *dev;
 
 	if (!priv->intr_handle)
 		return 0;
+
+	/* Unregister PCI device removal event callback */
+	dev = &rte_eth_devices[priv->port_id];
+	if (dev->device)
+		rte_dev_event_callback_unregister(dev->device->name,
+						  mana_pci_remove_event_cb,
+						  priv);
 
 	ret = rte_intr_callback_unregister(priv->intr_handle,
 					   mana_intr_handler, priv);
@@ -1735,6 +1863,14 @@ mana_intr_install(struct rte_eth_dev *eth_dev, struct mana_priv *priv)
 		rte_intr_fd_set(priv->intr_handle, -1);
 		goto free_intr;
 	}
+
+	/* Register for PCI device removal events to distinguish
+	 * PCI hot-remove from service reset.
+	 */
+	ret = rte_dev_event_callback_register(eth_dev->device->name,
+					      mana_pci_remove_event_cb, priv);
+	if (ret)
+		DRV_LOG(WARNING, "Failed to register PCI remove event callback");
 
 	eth_dev->intr_handle = priv->intr_handle;
 	return 0;
@@ -2073,6 +2209,8 @@ mana_probe_port(struct ibv_device *ibdev, struct ibv_device_attr_ex *dev_attr,
 	}
 
 	rte_spinlock_init(&priv->reset_ops_lock);
+	pthread_mutex_init(&priv->reset_cond_mutex, NULL);
+	pthread_cond_init(&priv->reset_cond, NULL);
 
 	eth_dev->device = &pci_dev->device;
 
