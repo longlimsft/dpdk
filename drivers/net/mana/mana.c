@@ -303,6 +303,17 @@ mana_dev_close(struct rte_eth_dev *dev)
 	struct mana_priv *priv = dev->data->dev_private;
 	int ret;
 
+	/* Wait for reset thread to finish before freeing resources */
+	if (priv->reset_thread_active) {
+		pthread_mutex_lock(&priv->reset_cond_mutex);
+		rte_atomic_store_explicit(&priv->dev_state,
+			MANA_DEV_ACTIVE, rte_memory_order_release);
+		pthread_cond_signal(&priv->reset_cond);
+		pthread_mutex_unlock(&priv->reset_cond_mutex);
+		rte_thread_join(priv->reset_thread, NULL);
+		priv->reset_thread_active = false;
+	}
+
 	DRV_LOG(DEBUG, "Free MR for priv %p", priv);
 	mana_remove_all_mr(priv);
 
@@ -1640,8 +1651,6 @@ static void
 mana_reset_exit(struct mana_priv *priv)
 {
 	int ret;
-	rte_thread_t tid;
-	struct rte_eth_dev *dev;
 
 	if (!priv) {
 		DRV_LOG(ERR, "Private structure invalid");
@@ -1651,43 +1660,29 @@ mana_reset_exit(struct mana_priv *priv)
 
 	rxq_intr_disable(priv);
 
-	/* Interrupt source is inactive.
-	 * Use rte_intr_callback_unregister to properly remove
-	 * the fd from epoll and clean up the source.
+	/* Unregister the interrupt handler. Since mana_reset_exit is always
+	 * called from mana_reset_thread (a non-interrupt thread), the
+	 * interrupt source is inactive and rte_intr_callback_unregister
+	 * succeeds directly.
 	 */
-	ret = rte_intr_callback_unregister(priv->intr_handle,
-					   mana_intr_handler, priv);
-	if (ret < 0) {
-		DRV_LOG(ERR, "Failed to unregister intr callback ret %d", ret);
-		goto failed;
+	if (priv->intr_handle) {
+		ret = rte_intr_callback_unregister(priv->intr_handle,
+						   mana_intr_handler, priv);
+		if (ret < 0)
+			DRV_LOG(ERR, "Failed to unregister intr callback ret %d",
+				ret);
+		else
+			DRV_LOG(DEBUG, "%d intr callback(s) removed", ret);
+
+		rte_intr_instance_free(priv->intr_handle);
+		priv->intr_handle = NULL;
 	}
 
-	DRV_LOG(DEBUG, "%d intr callback(s) removed", ret);
-
-	rte_intr_instance_free(priv->intr_handle);
-	priv->intr_handle = NULL;
-
-	ret = rte_thread_create_control(&tid, "Mana reset exit delay",
-					mana_reset_exit_delay, priv);
-	if (ret) {
-		DRV_LOG(ERR, "Failed to create reset exit thread ret %d", ret);
-		goto failed;
-	}
-	rte_thread_detach(tid);
-
-	return;
-
-failed:
-	rte_atomic_store_explicit(&priv->dev_state,
-		MANA_DEV_RESET_FAILED, rte_memory_order_release);
-
-	dev = &rte_eth_devices[priv->port_id];
-	DRV_LOG(INFO, "Sending RTE_ETH_EVENT_RECOVERY_FAILED for port %u",
-		priv->port_id);
-	rte_eth_dev_callback_process(dev,
-				     RTE_ETH_EVENT_RECOVERY_FAILED, NULL);
-
-	rte_spinlock_unlock(&priv->reset_ops_lock);
+	/* Proceed directly to reset exit delay (re-probe and restart).
+	 * No need for a separate thread - we are already on
+	 * mana_reset_thread which is a non-interrupt control thread.
+	 */
+	mana_reset_exit_delay(priv);
 }
 
 /*
