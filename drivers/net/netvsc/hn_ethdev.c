@@ -709,17 +709,33 @@ static void netvsc_hotplug_retry(void *args)
 			 * parent device, restore its args.
 			 */
 			ret = rte_eal_hotplug_add(d->bus->name, d->name, drv_str ? drv_str : "");
-			if (ret) {
-				PMD_DRV_LOG(ERR,
-					    "Failed to add PCI device %s",
+			free(drv_str);
+
+			if (ret == -ENODEV) {
+				/* IB device not ready yet (mana_ib not probed).
+				 * Restart the full retry from PCI device check
+				 * so we re-verify the device and get fresh
+				 * interface names after any renames.
+				 */
+				PMD_DRV_LOG(NOTICE,
+					    "IB device not ready for %s, "
+					    "restarting probe in 1 second",
 					    d->name);
+				closedir(di);
+				rte_eal_alarm_set(NETVSC_HOTADD_RETRY_INTERVAL,
+						  netvsc_hotplug_retry,
+						  hot_ctx);
+				return;
 			}
 
-			free(drv_str);
+			if (ret && ret != -EEXIST)
+				PMD_DRV_LOG(NOTICE,
+					    "Failed to add PCI device %s (ret=%d)",
+					    d->name, ret);
 
 			ret = hn_vf_add(dev, hv);
 			if (ret)
-				PMD_DRV_LOG(ERR, "Failed to add VF in hotplug retry: %d", ret);
+				PMD_DRV_LOG(ERR, "Failed to add VF: %d", ret);
 			break;
 		}
 	}
