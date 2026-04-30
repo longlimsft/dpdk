@@ -749,7 +749,7 @@ void hn_vf_rx_queue_release(struct hn_data *hv, uint16_t queue_id)
 
 int hn_vf_stats_get(struct rte_eth_dev *dev,
 		    struct rte_eth_stats *stats,
-		    struct eth_queue_stats *qstats __rte_unused)
+		    struct eth_queue_stats *qstats)
 {
 	struct hn_data *hv = dev->data->dev_private;
 	struct rte_eth_dev *vf_dev;
@@ -757,8 +757,12 @@ int hn_vf_stats_get(struct rte_eth_dev *dev,
 
 	rte_rwlock_read_lock(&hv->vf_lock);
 	vf_dev = hn_get_vf_dev(hv);
-	if (vf_dev)
-		ret = rte_eth_stats_get(vf_dev->data->port_id, stats);
+	if (vf_dev) {
+		if (vf_dev->dev_ops->stats_get)
+			ret = vf_dev->dev_ops->stats_get(vf_dev, stats, qstats);
+		else
+			ret = rte_eth_stats_get(vf_dev->data->port_id, stats);
+	}
 	rte_rwlock_read_unlock(&hv->vf_lock);
 	return ret;
 }
