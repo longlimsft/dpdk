@@ -1384,9 +1384,23 @@ mlx5_dev_spawn(struct rte_device *dpdk_dev,
 		 * Ethdev pointer is still required as input since
 		 * the primary device is not accessible from the
 		 * secondary process.
+		 *
+		 * Choose the initial burst based on whether the primary has
+		 * already configured the queues (rx_queues non-NULL in shared
+		 * memory). If not, install the dummy burst so the fp_ops
+		 * snapshot taken by rte_eth_dev_probing_finish() is safe
+		 * ({ dummy, NULL rxq.data }). The self-transition after
+		 * probing_finish (in the caller) recovers the case where the
+		 * primary races to configure between our check and
+		 * probing_finish.
 		 */
-		eth_dev->rx_pkt_burst = mlx5_select_rx_function(eth_dev);
-		eth_dev->tx_pkt_burst = mlx5_select_tx_function(eth_dev);
+		if (eth_dev->data->rx_queues != NULL) {
+			eth_dev->rx_pkt_burst = mlx5_select_rx_function(eth_dev);
+			eth_dev->tx_pkt_burst = mlx5_select_tx_function(eth_dev);
+		} else {
+			eth_dev->rx_pkt_burst = rte_eth_pkt_burst_dummy;
+			eth_dev->tx_pkt_burst = rte_eth_pkt_burst_dummy;
+		}
 		return eth_dev;
 err_secondary:
 		mlx5_dev_close(eth_dev);
@@ -2964,6 +2978,34 @@ mlx5_os_pci_probe_pf(struct mlx5_common_device *cdev,
 		/* Restore non-PCI flags cleared by the above call. */
 		list[i].eth_dev->data->dev_flags |= restore;
 		rte_eth_dev_probing_finish(list[i].eth_dev);
+		/*
+		 * Race recovery for secondary process: the primary may have
+		 * finished rte_eth_dev_configure() (allocating rx_queues)
+		 * between mlx5_dev_spawn's initial burst choice and
+		 * probing_finish above. Re-check and self-transition to the
+		 * real burst if so, using the same publication order as the
+		 * START_RXTX MP handler.
+		 */
+		if (rte_eal_process_type() == RTE_PROC_SECONDARY &&
+		    list[i].eth_dev->rx_pkt_burst == rte_eth_pkt_burst_dummy &&
+		    list[i].eth_dev->data->rx_queues != NULL) {
+			uint16_t port_id = list[i].eth_dev->data->port_id;
+
+			rte_eth_fp_ops[port_id].rxq.data =
+				list[i].eth_dev->data->rx_queues;
+			rte_eth_fp_ops[port_id].txq.data =
+				list[i].eth_dev->data->tx_queues;
+			rte_wmb();
+			list[i].eth_dev->rx_pkt_burst =
+				mlx5_select_rx_function(list[i].eth_dev);
+			list[i].eth_dev->tx_pkt_burst =
+				mlx5_select_tx_function(list[i].eth_dev);
+			rte_eth_fp_ops[port_id].rx_pkt_burst =
+				list[i].eth_dev->rx_pkt_burst;
+			rte_eth_fp_ops[port_id].tx_pkt_burst =
+				list[i].eth_dev->tx_pkt_burst;
+			rte_mb();
+		}
 	}
 	if (i != ns) {
 		DRV_LOG(ERR,
@@ -3129,6 +3171,26 @@ mlx5_os_auxiliary_probe(struct mlx5_common_device *cdev,
 		eth_dev->data->numa_node = dev->numa_node;
 	}
 	rte_eth_dev_probing_finish(eth_dev);
+	/*
+	 * Race recovery for secondary process: the primary may have
+	 * finished rte_eth_dev_configure() (allocating rx_queues) between
+	 * mlx5_dev_spawn's initial burst choice and probing_finish above.
+	 * Re-check and self-transition to the real burst if so.
+	 */
+	if (rte_eal_process_type() == RTE_PROC_SECONDARY &&
+	    eth_dev->rx_pkt_burst == rte_eth_pkt_burst_dummy &&
+	    eth_dev->data->rx_queues != NULL) {
+		uint16_t port_id = eth_dev->data->port_id;
+
+		rte_eth_fp_ops[port_id].rxq.data = eth_dev->data->rx_queues;
+		rte_eth_fp_ops[port_id].txq.data = eth_dev->data->tx_queues;
+		rte_wmb();
+		eth_dev->rx_pkt_burst = mlx5_select_rx_function(eth_dev);
+		eth_dev->tx_pkt_burst = mlx5_select_tx_function(eth_dev);
+		rte_eth_fp_ops[port_id].rx_pkt_burst = eth_dev->rx_pkt_burst;
+		rte_eth_fp_ops[port_id].tx_pkt_burst = eth_dev->tx_pkt_burst;
+		rte_mb();
+	}
 	return 0;
 }
 
