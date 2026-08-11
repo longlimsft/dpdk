@@ -208,10 +208,17 @@ struct rte_mp_msg mp_res;
 			}
 		}
 		close(mp_msg->fds[0]);
-		rte_eth_fp_ops[param->port_id].rx_pkt_burst = dev->rx_pkt_burst;
-		rte_eth_fp_ops[param->port_id].tx_pkt_burst = dev->tx_pkt_burst;
+		/*
+		 * Publication order: rxq/txq.data must be visible before
+		 * rx/tx_pkt_burst so a concurrent poller that observes
+		 * the real burst is guaranteed to also observe the
+		 * corresponding non-NULL queue-data array.
+		 */
 		rte_eth_fp_ops[param->port_id].rxq.data = dev->data->rx_queues;
 		rte_eth_fp_ops[param->port_id].txq.data = dev->data->tx_queues;
+		rte_wmb();
+		rte_eth_fp_ops[param->port_id].rx_pkt_burst = dev->rx_pkt_burst;
+		rte_eth_fp_ops[param->port_id].tx_pkt_burst = dev->tx_pkt_burst;
 		rte_mb();
 		mp_init_msg(&priv->mp_id, &mp_res, param->type);
 		res->result = 0;
