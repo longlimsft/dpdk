@@ -927,12 +927,50 @@ mlx4_pci_probe(struct rte_pci_driver *pci_drv, struct rte_pci_device *pci_dev)
 			 * Ethdev pointer is still required as input since
 			 * the primary device is not accessible from the
 			 * secondary process.
+			 *
+			 * Choose the initial burst based on whether the
+			 * primary has already configured the queues
+			 * (rx_queues non-NULL in shared memory). If not,
+			 * install rte_eth_pkt_burst_dummy so the fp_ops
+			 * snapshot taken by rte_eth_dev_probing_finish() is
+			 * safe ({ dummy, NULL rxq.data }).
 			 */
-			eth_dev->tx_pkt_burst = mlx4_tx_burst;
-			eth_dev->rx_pkt_burst = mlx4_rx_burst;
+			if (eth_dev->data->rx_queues != NULL) {
+				eth_dev->tx_pkt_burst = mlx4_tx_burst;
+				eth_dev->rx_pkt_burst = mlx4_rx_burst;
+			} else {
+				eth_dev->tx_pkt_burst = rte_eth_pkt_burst_dummy;
+				eth_dev->rx_pkt_burst = rte_eth_pkt_burst_dummy;
+			}
 			claim_zero(mlx4_glue->close_device(ctx));
 			rte_eth_copy_pci_info(eth_dev, pci_dev);
 			rte_eth_dev_probing_finish(eth_dev);
+
+			/*
+			 * Race recovery: the primary may have finished
+			 * rte_eth_dev_configure() between our initial choice
+			 * above and probing_finish. Re-check and self-
+			 * transition to the real burst if we ended up on
+			 * the dummy, using the same publication order as the
+			 * START_RXTX MP handler.
+			 */
+			if (eth_dev->rx_pkt_burst == rte_eth_pkt_burst_dummy &&
+			    eth_dev->data->rx_queues != NULL) {
+				uint16_t port_id = eth_dev->data->port_id;
+
+				rte_eth_fp_ops[port_id].rxq.data =
+					eth_dev->data->rx_queues;
+				rte_eth_fp_ops[port_id].txq.data =
+					eth_dev->data->tx_queues;
+				rte_wmb();
+				eth_dev->tx_pkt_burst = mlx4_tx_burst;
+				eth_dev->rx_pkt_burst = mlx4_rx_burst;
+				rte_eth_fp_ops[port_id].rx_pkt_burst =
+					eth_dev->rx_pkt_burst;
+				rte_eth_fp_ops[port_id].tx_pkt_burst =
+					eth_dev->tx_pkt_burst;
+				rte_mb();
+			}
 			prev_dev = eth_dev;
 			continue;
 err_secondary:
