@@ -120,8 +120,27 @@ mp_secondary_handle(const struct rte_mp_msg *mp_msg, const void *peer)
 
 	MLX4_ASSERT(rte_eal_process_type() == RTE_PROC_SECONDARY);
 	if (!rte_eth_dev_is_valid_port(param->port_id)) {
-		rte_errno = ENODEV;
 		ERROR("port %u invalid port ID", param->port_id);
+		/*
+		 * The port is not yet RTE_ETH_DEV_ATTACHED, but we must
+		 * still reply so the primary does not stall until timeout.
+		 * mp_handle is a single reader thread and blocking here
+		 * would prevent it from delivering replies to any outbound
+		 * sync request. Instead reply -ENODEV; if this is a
+		 * START_RXTX broadcast, the secondary probe's post-
+		 * probing_finish self-transition will install the real
+		 * burst once the port is fully attached.
+		 */
+		memset(&mp_res, 0, sizeof(mp_res));
+		strlcpy(mp_res.name, MLX4_MP_NAME, sizeof(mp_res.name));
+		mp_res.len_param = sizeof(*res);
+		res->type = param->type;
+		res->port_id = param->port_id;
+		res->result = -ENODEV;
+		if (rte_mp_reply(&mp_res, peer) < 0)
+			ERROR("port %u failed to send -ENODEV reply",
+			      param->port_id);
+		rte_errno = ENODEV;
 		return -rte_errno;
 	}
 	dev = &rte_eth_devices[param->port_id];
