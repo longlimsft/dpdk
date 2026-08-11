@@ -2207,11 +2207,52 @@ mana_probe_port(struct ibv_device *ibdev, struct ibv_device_attr_ex *dev_attr,
 		/* fd is not used after mapping doorbell */
 		close(fd);
 
-		eth_dev->tx_pkt_burst = mana_tx_burst;
-		eth_dev->rx_pkt_burst = mana_rx_burst;
+		/*
+		 * If the primary has already configured the queues (rx_queues
+		 * is non-NULL in shared memory), install the real bursts so
+		 * probing_finish publishes { real_burst, real_rxq.data } into
+		 * rte_eth_fp_ops[port_id] atomically from the poller's point
+		 * of view. Otherwise install the removed burst so probing_finish
+		 * publishes { removed_burst, NULL rxq.data } which is safe to
+		 * poll (returns 0). Any subsequent START_RXTX MP broadcast
+		 * from the primary will upgrade us to the real burst with the
+		 * correct publication order.
+		 */
+		if (eth_dev->data->rx_queues != NULL) {
+			eth_dev->tx_pkt_burst = mana_tx_burst;
+			eth_dev->rx_pkt_burst = mana_rx_burst;
+		} else {
+			eth_dev->tx_pkt_burst = mana_tx_burst_removed;
+			eth_dev->rx_pkt_burst = mana_rx_burst_removed;
+		}
 
 		rte_eth_copy_pci_info(eth_dev, pci_dev);
 		rte_eth_dev_probing_finish(eth_dev);
+
+		/*
+		 * Race recovery: the primary may have completed
+		 * rte_eth_dev_configure() (allocating rx_queues) between the
+		 * check above and probing_finish. Re-check under the same
+		 * publication ordering as the MP handler and self-transition
+		 * to the real burst if needed. This closes the window where
+		 * our probe missed a START_RXTX broadcast because the
+		 * primary raced against our own probing_finish.
+		 */
+		if (eth_dev->rx_pkt_burst == mana_rx_burst_removed &&
+		    eth_dev->data->rx_queues != NULL) {
+			uint16_t port_id = eth_dev->data->port_id;
+
+			rte_eth_fp_ops[port_id].rxq.data =
+				eth_dev->data->rx_queues;
+			rte_eth_fp_ops[port_id].txq.data =
+				eth_dev->data->tx_queues;
+			rte_wmb();
+			rte_eth_fp_ops[port_id].rx_pkt_burst = mana_rx_burst;
+			rte_eth_fp_ops[port_id].tx_pkt_burst = mana_tx_burst;
+			eth_dev->tx_pkt_burst = mana_tx_burst;
+			eth_dev->rx_pkt_burst = mana_rx_burst;
+			rte_mb();
+		}
 
 		return 0;
 	}
