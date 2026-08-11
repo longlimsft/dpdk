@@ -396,7 +396,8 @@ mana_mp_req_on_rxtx(struct rte_eth_dev *dev, enum mana_mp_req_type type)
 		return -EINVAL;
 	}
 
-	if (rte_atomic_load_explicit(&mana_shared_data->secondary_cnt, rte_memory_order_relaxed) == 0)
+	if (rte_atomic_load_explicit(&mana_shared_data->secondary_cnt,
+				     rte_memory_order_acquire) == 0)
 		return 0;
 
 	mp_init_msg(&mp_req, type, dev->data->port_id);

@@ -2461,6 +2461,8 @@ mana_pci_probe(struct rte_pci_driver *pci_drv __rte_unused,
 	unsigned int i;
 	int ret;
 	int count = 0;
+	bool is_secondary = (rte_eal_process_type() == RTE_PROC_SECONDARY);
+	bool secondary_cnt_bumped = false;
 
 	if (args && args->drv_str) {
 		ret = mana_parse_args(args, &conf);
@@ -2477,6 +2479,30 @@ mana_pci_probe(struct rte_pci_driver *pci_drv __rte_unused,
 		return ret;
 	}
 
+	/*
+	 * Pre-increment secondary_cnt so a concurrent mana_dev_start() on
+	 * the primary observes secondary_cnt > 0 and broadcasts
+	 * MANA_MP_REQ_START_RXTX to us. Without this, mana_mp_req_on_rxtx()
+	 * early-returns on secondary_cnt == 0 when the primary races
+	 * between our per-port mana_probe_port() and the increment that
+	 * previously happened only at the end of this function. In that
+	 * case the probed port stays on the removed burst forever.
+	 *
+	 * The order is: MP handler is already registered (in mana_init_once
+	 * above) before we increment; a broadcast that arrives before a
+	 * given port reaches RTE_ETH_DEV_ATTACHED is rejected with -ENODEV
+	 * by mana_mp_secondary_handle() and recovered by the secondary
+	 * probe's post-probing_finish self-transition.
+	 */
+	if (is_secondary) {
+		rte_spinlock_lock(&mana_shared_data_lock);
+		rte_atomic_fetch_add_explicit(&mana_shared_data->secondary_cnt,
+					      1, rte_memory_order_release);
+		mana_local_data.secondary_cnt++;
+		rte_spinlock_unlock(&mana_shared_data_lock);
+		secondary_cnt_bumped = true;
+	}
+
 	/* If there are no driver parameters, probe on all ports */
 	if (conf.index) {
 		for (i = 0; i < conf.index; i++)
@@ -2489,7 +2515,7 @@ mana_pci_probe(struct rte_pci_driver *pci_drv __rte_unused,
 	/* If no device is found, clean up resources if this is the last one */
 	if (!count) {
 		rte_spinlock_lock(&mana_shared_data_lock);
-		if (rte_eal_process_type() == RTE_PROC_PRIMARY) {
+		if (!is_secondary) {
 			if (!mana_local_data.primary_cnt) {
 				mana_mp_uninit_primary();
 				rte_memzone_free(mana_shared_mz);
@@ -2497,6 +2523,16 @@ mana_pci_probe(struct rte_pci_driver *pci_drv __rte_unused,
 				mana_shared_data = NULL;
 			}
 		} else {
+			/*
+			 * Undo the pre-increment above; we found no ports so
+			 * this call did not contribute a live secondary.
+			 */
+			if (secondary_cnt_bumped) {
+				rte_atomic_fetch_sub_explicit(
+					&mana_shared_data->secondary_cnt, 1,
+					rte_memory_order_relaxed);
+				mana_local_data.secondary_cnt--;
+			}
 			if (!mana_local_data.secondary_cnt) {
 				mana_mp_uninit_secondary();
 				mana_shared_data = NULL;
@@ -2506,16 +2542,15 @@ mana_pci_probe(struct rte_pci_driver *pci_drv __rte_unused,
 		return -ENODEV;
 	}
 
-	/* At least one eth_dev is probed, increase counter for shared data */
-	rte_spinlock_lock(&mana_shared_data_lock);
-	if (rte_eal_process_type() == RTE_PROC_PRIMARY) {
+	/*
+	 * At least one eth_dev is probed. Primary bookkeeping happens
+	 * here; secondary already bumped its counters above.
+	 */
+	if (!is_secondary) {
+		rte_spinlock_lock(&mana_shared_data_lock);
 		mana_local_data.primary_cnt++;
-	} else {
-		rte_atomic_fetch_add_explicit(&mana_shared_data->secondary_cnt, 1,
-					      rte_memory_order_relaxed);
-		mana_local_data.secondary_cnt++;
+		rte_spinlock_unlock(&mana_shared_data_lock);
 	}
-	rte_spinlock_unlock(&mana_shared_data_lock);
 
 	return 0;
 }
