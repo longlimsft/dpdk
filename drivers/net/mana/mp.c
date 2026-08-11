@@ -170,13 +170,20 @@ mana_mp_secondary_handle(const struct rte_mp_msg *mp_msg, const void *peer)
 	case MANA_MP_REQ_START_RXTX:
 		DRV_LOG(INFO, "Port %u starting datapath", dev->data->port_id);
 
-		dev->tx_pkt_burst = mana_tx_burst;
-		dev->rx_pkt_burst = mana_rx_burst;
-
-		rte_eth_fp_ops[param->port_id].rx_pkt_burst = mana_rx_burst;
-		rte_eth_fp_ops[param->port_id].tx_pkt_burst = mana_tx_burst;
+		/*
+		 * Publication order matters: rxq/txq.data must be written
+		 * before rx/tx_pkt_burst so that a concurrent poller that
+		 * observes the real burst is guaranteed to also observe the
+		 * corresponding non-NULL queue-data array.
+		 */
 		rte_eth_fp_ops[param->port_id].rxq.data = dev->data->rx_queues;
 		rte_eth_fp_ops[param->port_id].txq.data = dev->data->tx_queues;
+		rte_wmb();
+		rte_eth_fp_ops[param->port_id].rx_pkt_burst = mana_rx_burst;
+		rte_eth_fp_ops[param->port_id].tx_pkt_burst = mana_tx_burst;
+
+		dev->tx_pkt_burst = mana_tx_burst;
+		dev->rx_pkt_burst = mana_rx_burst;
 
 		rte_mb();
 
