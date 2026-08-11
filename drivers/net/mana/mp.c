@@ -150,8 +150,16 @@ mana_mp_secondary_handle(const struct rte_mp_msg *mp_msg, const void *peer)
 	int ret;
 
 	if (!rte_eth_dev_is_valid_port(param->port_id)) {
-		DRV_LOG(ERR, "MP handle port ID %u invalid", param->port_id);
-		return -ENODEV;
+		/*
+		 * The port is not yet attached (or already released) in this
+		 * secondary process. Reply immediately so the primary does not
+		 * wait for the sync-request timeout. The secondary probe path
+		 * self-transitions to the real burst after probing_finish.
+		 */
+		DRV_LOG(DEBUG, "MP handle port %u not ready", param->port_id);
+		mp_init_msg(&mp_res, param->type, param->port_id);
+		res->result = -ENODEV;
+		return rte_mp_reply(&mp_res, peer);
 	}
 
 	dev = &rte_eth_devices[param->port_id];
