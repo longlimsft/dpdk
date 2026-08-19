@@ -1627,6 +1627,10 @@ reset_failed:
 }
 
 static int
+mana_pci_probe_mac(struct rte_pci_device *pci_dev,
+		   struct rte_ether_addr *mac_addr);
+
+static int
 mana_reset_exit_delay(void *arg)
 {
 	struct mana_priv *priv = (struct mana_priv *)arg;
@@ -1661,13 +1665,27 @@ mana_reset_exit_delay(void *arg)
 	}
 	priv->ib_ctx = NULL;
 
-	ret = mana_pci_probe(NULL, pci_dev);
-	if (ret) {
-		DRV_LOG(ERR, "Failed to probe mana pci dev ret %d", ret);
+	/*
+	 * Re-probe only the port this reset owns.
+	 *
+	 * mana_pci_probe() walks every IB port on the device. With N ports
+	 * there are N reset threads, so each would re-probe all N ports and
+	 * overwrite ib_ctx/ib_pd/ib_parent_pd on peers that are concurrently
+	 * in mana_dev_start(). A peer picking up a PD from the new generation
+	 * while holding a CQ from the old one fails ibv_create_qp() with
+	 * EINVAL. Filtering on this port's MAC keeps a reset confined to its
+	 * own port.
+	 */
+	ret = mana_pci_probe_mac(pci_dev, dev->data->mac_addrs);
+	if (ret != 1) {
+		DRV_LOG(ERR, "Failed to probe mana port %u ret %d",
+			priv->port_id, ret);
 		rte_atomic_store_explicit(&priv->dev_state, MANA_DEV_RESET_FAILED,
 				     rte_memory_order_release);
+		ret = -ENODEV;
 		goto out;
 	}
+	ret = 0;
 
 	/*
 	 * Init the local MR caches.
