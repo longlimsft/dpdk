@@ -5,7 +5,11 @@
 #include <sys/mman.h>
 #include <rte_malloc.h>
 #include <ethdev_driver.h>
+#include <rte_cycles.h>
+#include <rte_errno.h>
+#include <rte_interrupts.h>
 #include <rte_log.h>
+#include <rte_random.h>
 #include <rte_eal_paging.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -15,6 +19,15 @@
 #include "mana.h"
 
 extern struct mana_shared_data *mana_shared_data;
+
+/* Bounded retries for a transient EEXIST from rte_mp_request_sync(). The
+ * worst case backoff (retries x span) covers MANA_MP_REQ_TIMEOUT_SEC, so a
+ * collision with a peer that holds the slot for a full request timeout can
+ * still be ridden out.
+ */
+#define MANA_MP_REQ_MAX_RETRY 5
+#define MANA_MP_REQ_RETRY_MIN_US 10000		/* 10 ms */
+#define MANA_MP_REQ_RETRY_SPAN_US 1000000	/* + up to 1 s */
 
 /*
  * Process MR request from secondary process.
@@ -379,6 +392,69 @@ mana_mp_req_mr_create(struct mana_priv *priv, uintptr_t addr, uint32_t len)
 	return ret;
 }
 
+/*
+ * Issue an MP request, retrying on EEXIST.
+ *
+ * MANA sends one request per port, and the per-port reset threads run
+ * concurrently. EAL permits only a single in-flight request per
+ * (peer socket, action name) pair, and every MANA request uses the same
+ * name (MANA_MP_NAME) to the same secondary. A caller that collides with
+ * an in-flight request is rejected with EEXIST by find_request_by_name()
+ * before anything is transmitted (nb_sent stays 0), so no peer has seen
+ * the message and the request can simply be reissued.
+ *
+ * Back off for a random interval so the colliding threads de-synchronise
+ * instead of retrying in lockstep.
+ *
+ * Sleeping is skipped in interrupt context: MANA_MP_REQ_RESET_ENTER is
+ * issued from mana_intr_handler() on the EAL interrupt thread, and
+ * blocking there would stall interrupt processing for every device.
+ */
+static int
+mana_mp_request_sync_retry(struct rte_eth_dev *dev, enum mana_mp_req_type type,
+			   struct rte_mp_msg *mp_req,
+			   struct rte_mp_reply *mp_rep,
+			   const struct timespec *ts)
+{
+	int retry = 0;
+	unsigned int delay_us;
+	int ret;
+
+	while (true) {
+		ret = rte_mp_request_sync(mp_req, mp_rep, ts);
+		if (ret == 0)
+			break;
+
+		if (rte_errno != EEXIST || retry >= MANA_MP_REQ_MAX_RETRY ||
+		    rte_thread_is_intr())
+			break;
+
+		/*
+		 * On failure rte_mp_request_sync() has already freed and
+		 * cleared mp_rep, so it is safe to reuse for the next try.
+		 */
+		retry++;
+		delay_us = MANA_MP_REQ_RETRY_MIN_US +
+			   rte_rand() % MANA_MP_REQ_RETRY_SPAN_US;
+
+		DRV_LOG(INFO,
+			"port %u request (%d) collided with an in-flight request, retry %d/%d in %u us",
+			dev->data->port_id, type, retry,
+			MANA_MP_REQ_MAX_RETRY, delay_us);
+
+		rte_delay_us_sleep(delay_us);
+	}
+
+	if (ret && rte_errno != ENOTSUP)
+		DRV_LOG(ERR,
+			"port %u failed to request Rx/Tx (%d) ret %d rte_errno %d (%s) nb_sent %d nb_received %d retries %d",
+			dev->data->port_id, type, ret, rte_errno,
+			rte_strerror(rte_errno), mp_rep->nb_sent,
+			mp_rep->nb_received, retry);
+
+	return ret;
+}
+
 int
 mana_mp_req_on_rxtx(struct rte_eth_dev *dev, enum mana_mp_req_type type)
 {
@@ -410,13 +486,9 @@ mana_mp_req_on_rxtx(struct rte_eth_dev *dev, enum mana_mp_req_type type)
 		mp_req.fds[0] = priv->ib_ctx->cmd_fd;
 	}
 
-	ret = rte_mp_request_sync(&mp_req, &mp_rep, &ts);
-	if (ret) {
-		if (rte_errno != ENOTSUP)
-			DRV_LOG(ERR, "port %u failed to request Rx/Tx (%d)",
-				dev->data->port_id, type);
+	ret = mana_mp_request_sync_retry(dev, type, &mp_req, &mp_rep, &ts);
+	if (ret)
 		goto exit;
-	}
 	if (mp_rep.nb_sent != mp_rep.nb_received) {
 		DRV_LOG(ERR, "port %u not all secondaries responded (%d)",
 			dev->data->port_id, type);
